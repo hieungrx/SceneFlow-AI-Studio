@@ -1,18 +1,6 @@
 import { env } from "cloudflare:workers";
 import type { RenderManifest } from "./types";
-
-type RendererResponse = {
-  outputUri?: string;
-  output?: {
-    contentType?: string;
-    bytes?: number;
-    durationSeconds?: number;
-    width?: number;
-    height?: number;
-  };
-  error?: string;
-  message?: string;
-};
+import { callRendererHttp } from "./renderer-http";
 
 type RendererConfig = {
   url: string;
@@ -29,11 +17,13 @@ export async function extractLastFrame(
   const config = rendererConfig();
   if (!config) return null;
   const outputGcsUri = `${config.outputGcsPrefix}/projects/${projectId}/frames/${sceneId}-${versionId}-last.jpg`;
-  const body = await callRenderer(config, "/extract-last-frame", {
-    videoUri: inputUri,
-    format: "jpeg",
-    outputGcsUri,
-  });
+  const body = await callRendererHttp(
+    config.url,
+    config.secret,
+    "/extract-last-frame",
+    { videoUri: inputUri, format: "jpeg", outputGcsUri },
+    { requestId: versionId, expectedOutputUri: outputGcsUri },
+  );
   return body.outputUri ?? outputGcsUri;
 }
 
@@ -49,20 +39,26 @@ export async function dispatchFinalRender(input: {
     0,
     ...input.manifest.scenes.map((scene) => scene.transitionDurationSeconds),
   );
-  const body = await callRenderer(config, "/render", {
-    clips: input.manifest.scenes.map((scene) => ({ uri: scene.sourceUri })),
-    width: input.manifest.output.width,
-    height: input.manifest.output.height,
-    fps: input.manifest.output.fps,
-    includeAudio: true,
-    transition: {
-      type: transitionDuration > 0 ? "fade" : "cut",
-      durationSeconds: transitionDuration,
+  const body = await callRendererHttp(
+    config.url,
+    config.secret,
+    "/render",
+    {
+      clips: input.manifest.scenes.map((scene) => ({ uri: scene.sourceUri })),
+      width: input.manifest.output.width,
+      height: input.manifest.output.height,
+      fps: input.manifest.output.fps,
+      includeAudio: true,
+      transition: {
+        type: transitionDuration > 0 ? "fade" : "cut",
+        durationSeconds: transitionDuration,
+      },
+      crf: 20,
+      preset: "veryfast",
+      outputGcsUri,
     },
-    crf: 20,
-    preset: "veryfast",
-    outputGcsUri,
-  });
+    { requestId: input.renderId, expectedOutputUri: outputGcsUri },
+  );
   return {
     outputUri: body.outputUri ?? outputGcsUri,
     durationSeconds: body.output?.durationSeconds ?? null,
@@ -81,20 +77,4 @@ function rendererConfig(): RendererConfig | null {
     secret: runtime.RENDER_SERVICE_SECRET,
     outputGcsPrefix: outputGcsPrefix.replace(/\/+$/, ""),
   };
-}
-
-async function callRenderer(config: RendererConfig, path: string, payload: unknown): Promise<RendererResponse> {
-  const response = await fetch(`${config.url}${path}`, {
-    method: "POST",
-    headers: {
-      "x-renderer-token": config.secret,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
-  const body = (await response.json().catch(() => ({}))) as RendererResponse;
-  if (!response.ok) {
-    throw new Error(body.message ?? body.error ?? `Renderer request failed (${response.status}).`);
-  }
-  return body;
 }

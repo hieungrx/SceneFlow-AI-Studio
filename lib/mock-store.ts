@@ -101,6 +101,16 @@ export function getRender(id: string): FinalRender | null {
   return renders.get(id) ?? null;
 }
 
+export function findActiveRenderForProject(projectId: string): FinalRender | null {
+  return [...renders.values()]
+    .filter(
+      (render) =>
+        render.projectId === projectId &&
+        (render.status === "queued" || render.status === "running"),
+    )
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null;
+}
+
 export function updateRender(id: string, patch: Partial<FinalRender>): FinalRender | null {
   const render = renders.get(id);
   if (!render) return null;

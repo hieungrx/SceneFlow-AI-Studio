@@ -1,6 +1,12 @@
 import { NextResponse } from "next/server";
 import { getChatGPTUser } from "../../../../chatgpt-auth";
-import { createOwnedRender, getOwnedProject, listOwnedScenes, updateOwnedRender } from "../../../../../lib/repository";
+import {
+  createOwnedRender,
+  findOwnedActiveRenderForProject,
+  getOwnedProject,
+  listOwnedScenes,
+  updateOwnedRender,
+} from "../../../../../lib/repository";
 import { buildRenderManifest } from "../../../../../lib/render-plan";
 import type { FinalRender } from "../../../../../lib/types";
 import { dispatchFinalRender } from "../../../../../lib/renderer-client";
@@ -14,10 +20,21 @@ export async function POST(_request: Request, { params }: Context) {
   const project = await getOwnedProject(user.email, id);
   if (!project) return NextResponse.json({ error: "project_not_found" }, { status: 404 });
   const scenes = await listOwnedScenes(user.email, id);
-  if (scenes.length === 0 || scenes.some((scene) => !scene.outputVideoUri)) {
+  if (
+    scenes.length === 0 ||
+    scenes.some((scene) => scene.status !== "approved" || !scene.outputVideoUri)
+  ) {
     return NextResponse.json(
-      { error: "scenes_not_ready", message: "Mọi cảnh phải hoàn tất trước khi ghép." },
+      { error: "scenes_not_ready", message: "Mọi cảnh phải được duyệt trước khi ghép." },
       { status: 409 },
+    );
+  }
+
+  const activeRender = await findOwnedActiveRenderForProject(user.email, project.id);
+  if (activeRender) {
+    return NextResponse.json(
+      { render: { ...activeRender, renderer: "ffmpeg-cloud-run", mediaUrl: null }, reused: true },
+      { status: 202 },
     );
   }
 
@@ -34,36 +51,61 @@ export async function POST(_request: Request, { params }: Context) {
     updatedAt: now,
   };
   await createOwnedRender(user.email, render);
-  const dispatch = await dispatchFinalRender({ renderId: render.id, projectId: project.id, manifest });
-  const isMockRender = !dispatch && manifest.scenes.every((scene) => scene.sourceUri.startsWith("mock://"));
-  const completedRender: FinalRender | null = dispatch
-    ? {
-        ...render,
-        status: "done",
-        outputVideoUri: dispatch.outputUri,
-        durationSeconds: dispatch.durationSeconds ?? manifest.calculatedDurationSeconds,
-        updatedAt: new Date().toISOString(),
-      }
-    : isMockRender
+  const runningRender =
+    (await updateOwnedRender(user.email, render.id, { status: "running" })) ?? render;
+  try {
+    const dispatch = await dispatchFinalRender({ renderId: render.id, projectId: project.id, manifest });
+    const isMockRender = !dispatch && manifest.scenes.every((scene) => scene.sourceUri.startsWith("mock://"));
+    const completedRender: FinalRender | null = dispatch
       ? {
-          ...render,
+          ...runningRender,
           status: "done",
-          outputVideoUri: "/mock/sceneflow-preview.mp4",
-          durationSeconds: manifest.calculatedDurationSeconds,
+          outputVideoUri: dispatch.outputUri,
+          durationSeconds: dispatch.durationSeconds ?? manifest.calculatedDurationSeconds,
           updatedAt: new Date().toISOString(),
         }
-    : null;
-  const savedRender = completedRender
-    ? (await updateOwnedRender(user.email, render.id, completedRender)) ?? completedRender
-    : render;
-  return NextResponse.json(
-    {
-      render: {
-        ...savedRender,
-        renderer: dispatch ? "ffmpeg-cloud-run" : isMockRender ? "mock-ffmpeg" : "not_configured",
-        mediaUrl: savedRender.status === "done" ? `/api/renders/${savedRender.id}/media` : null,
+      : isMockRender
+        ? {
+            ...runningRender,
+            status: "done",
+            outputVideoUri: "/mock/sceneflow-preview.mp4",
+            durationSeconds: manifest.calculatedDurationSeconds,
+            updatedAt: new Date().toISOString(),
+          }
+        : null;
+    if (!completedRender) {
+      const failedRender =
+        (await updateOwnedRender(user.email, render.id, { status: "failed" })) ?? {
+          ...runningRender,
+          status: "failed" as const,
+        };
+      return NextResponse.json(
+        { error: "renderer_not_configured", render: failedRender },
+        { status: 503 },
+      );
+    }
+    const savedRender = completedRender
+      ? (await updateOwnedRender(user.email, render.id, completedRender)) ?? completedRender
+      : runningRender;
+    return NextResponse.json(
+      {
+        render: {
+          ...savedRender,
+          renderer: dispatch ? "ffmpeg-cloud-run" : isMockRender ? "mock-ffmpeg" : "not_configured",
+          mediaUrl: savedRender.status === "done" ? `/api/renders/${savedRender.id}/media` : null,
+        },
       },
-    },
-    { status: 202 },
-  );
+      { status: 202 },
+    );
+  } catch {
+    const failedRender =
+      (await updateOwnedRender(user.email, render.id, { status: "failed" })) ?? {
+        ...runningRender,
+        status: "failed" as const,
+      };
+    return NextResponse.json(
+      { error: "renderer_dispatch_failed", render: failedRender },
+      { status: 502 },
+    );
+  }
 }

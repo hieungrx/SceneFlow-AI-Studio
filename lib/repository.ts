@@ -463,6 +463,40 @@ export async function getOwnedRender(ownerId: string, renderId: string): Promise
   );
 }
 
+export async function findOwnedActiveRenderForProject(
+  ownerId: string,
+  projectId: string,
+): Promise<FinalRender | null> {
+  if (!(await getOwnedProject(ownerId, projectId))) return null;
+  return withMemoryFallback(
+    async (db) => {
+      const [row] = await db
+        .select()
+        .from(finalRendersTable)
+        .where(
+          and(
+            eq(finalRendersTable.projectId, projectId),
+            inArray(finalRendersTable.status, ["queued", "running"]),
+          ),
+        )
+        .orderBy(desc(finalRendersTable.createdAt))
+        .limit(1);
+      if (!row) return null;
+      return {
+        id: row.id,
+        projectId: row.projectId,
+        status: row.status as FinalRender["status"],
+        manifest: JSON.parse(row.manifestJson) as FinalRender["manifest"],
+        outputVideoUri: row.outputVideoKey,
+        durationSeconds: row.durationSeconds,
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt,
+      };
+    },
+    () => memory.findActiveRenderForProject(projectId),
+  );
+}
+
 export async function updateOwnedRender(
   ownerId: string,
   renderId: string,

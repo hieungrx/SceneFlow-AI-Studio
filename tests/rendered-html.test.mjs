@@ -47,3 +47,14 @@ test("wires the mock pipeline through a playable final render", () => {
   assert.match(dashboard, /render-preview/);
   assert.ok(preview.size > 1_000, "mock preview must contain playable MP4 data");
 });
+
+test("guards final rendering by approval and reuses an active render", () => {
+  const renderRoute = readProjectFile("app/api/projects/[id]/render/route.ts");
+  const repository = readProjectFile("lib/repository.ts");
+
+  assert.match(renderRoute, /scene\.status !== "approved"/);
+  assert.match(renderRoute, /findOwnedActiveRenderForProject/);
+  assert.match(renderRoute, /status: "running"/);
+  assert.match(renderRoute, /status: "failed"/);
+  assert.match(repository, /inArray\(finalRendersTable\.status, \["queued", "running"\]\)/);
+});
