@@ -1,0 +1,14 @@
+{
+  "name": "sceneflow-renderer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Dependency-light FFmpeg renderer for SceneFlow AI on Cloud Run",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "check": "node --check server.mjs"
+  }
+}
