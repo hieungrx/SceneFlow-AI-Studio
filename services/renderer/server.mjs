@@ -109,7 +109,10 @@ const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url ?? "/", "http://renderer.local");
 
-    if (request.method === "GET" && url.pathname === "/healthz") {
+    if (
+      request.method === "GET" &&
+      (url.pathname === "/health" || url.pathname === "/healthz" || url.pathname === "/healthz/")
+    ) {
       sendJson(response, 200, {
         ok: true,
         service: "sceneflow-renderer",
