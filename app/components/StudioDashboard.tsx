@@ -2,6 +2,8 @@
 
 import { useMemo, useState } from "react";
 import type { AssetKind, GenerationJob, PromptCompilation, Scene } from "../../lib/types";
+import SceneCard from "./SceneCard";
+import { getPipelineActionPolicy } from "./scene-action-policy";
 
 type StudioDashboardProps = {
   userName: string;
@@ -9,9 +11,12 @@ type StudioDashboardProps = {
 };
 
 type ProjectResponse = { project: { id: string } };
+type ProjectDetailResponse = { project: { id: string }; scenes: Scene[] };
 type StoryboardResponse = { scenes: Scene[] };
 type JobResponse = { job: GenerationJob; continuityReady?: boolean };
+type QcResponse = { scene: Scene; qc: { decision: "approve" | "reject"; reasonPersisted?: false } };
 type RenderResponse = { render: { id: string; status: string; outputVideoUri?: string | null; renderer?: string; mediaUrl?: string | null } };
+type PendingSceneAction = { sceneId: string; action: "approve" | "reject" | "generate" };
 
 const navItems = [
   ["✦", "Studio", ""],
@@ -49,6 +54,7 @@ export default function StudioDashboard({ userName, signedIn }: StudioDashboardP
   const [productFile, setProductFile] = useState<File | null>(null);
   const [characterFile, setCharacterFile] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
+  const [pendingSceneAction, setPendingSceneAction] = useState<PendingSceneAction | null>(null);
   const [notice, setNotice] = useState("Bản trải nghiệm đã sẵn sàng — chưa tiêu tốn credit.");
   const [renderMediaUrl, setRenderMediaUrl] = useState<string | null>(null);
 
@@ -57,6 +63,9 @@ export default function StudioDashboard({ userName, signedIn }: StudioDashboardP
     [scenes],
   );
   const runningJobs = jobs.filter((job) => job.status === "queued" || job.status === "running").length;
+  const hasActiveGeneration = signedIn
+    ? runningJobs > 0
+    : scenes.some((scene) => scene.status === "queued" || scene.status === "generating");
   const renderReady = scenes.length > 0 && scenes.every((scene) => scene.status === "approved");
 
   async function optimizePrompt() {
@@ -139,6 +148,13 @@ export default function StudioDashboard({ userName, signedIn }: StudioDashboardP
     }
   }
 
+  async function refreshProjectScenes(): Promise<Scene[] | null> {
+    if (!signedIn || !projectId) return null;
+    const response = await requestJson<ProjectDetailResponse>(`/api/projects/${projectId}`);
+    setScenes(response.scenes);
+    return response.scenes;
+  }
+
   async function generateNext() {
     const runningDemo = scenes.find(
       (scene) => scene.status === "generating" && scene.id.startsWith("scene_demo"),
@@ -159,18 +175,29 @@ export default function StudioDashboard({ userName, signedIn }: StudioDashboardP
   }
 
   async function generateScene(sceneId: string) {
+    const target = scenes.find((scene) => scene.id === sceneId);
+    if (!target) {
+      setNotice("Không tìm thấy cảnh cần tạo.");
+      return;
+    }
+    if (
+      target.status === "approved" &&
+      !window.confirm("Tạo lại cảnh đã duyệt sẽ khóa và xóa đầu ra của các cảnh phía sau. Bạn muốn tiếp tục?")
+    ) {
+      return;
+    }
     if (!signedIn || sceneId.startsWith("scene_demo")) {
       simulateScene(sceneId);
       return;
     }
     setBusy(true);
+    setPendingSceneAction({ sceneId, action: "generate" });
     try {
-      const target = scenes.find((scene) => scene.id === sceneId);
       const { job } = await requestJson<JobResponse>(`/api/scenes/${sceneId}/generate`, { method: "POST" });
       setJobs((current) => [job, ...current.filter((item) => item.sceneId !== sceneId)]);
       setScenes((current) => current.map((scene) => {
         if (scene.id === sceneId) return { ...scene, status: "queued" };
-        if (target?.status === "approved" && scene.sceneIndex > target.sceneIndex) {
+        if (["approved", "rejected", "failed"].includes(target.status) && scene.sceneIndex > target.sceneIndex) {
           return { ...scene, status: "waiting_previous", startFrameUri: null, endFrameUri: null, outputVideoUri: null, qualityScore: null };
         }
         return scene;
@@ -181,6 +208,7 @@ export default function StudioDashboard({ userName, signedIn }: StudioDashboardP
       setNotice(readableError(error));
     } finally {
       setBusy(false);
+      setPendingSceneAction((current) => current?.sceneId === sceneId ? null : current);
     }
   }
 
@@ -198,26 +226,80 @@ export default function StudioDashboard({ userName, signedIn }: StudioDashboardP
             : "generating",
       } : scene));
       if (job.status === "done") {
+        await refreshProjectScenes();
         setNotice("Video và frame cuối đã sẵn sàng. Cảnh đang chờ bạn duyệt QC.");
         return job;
       }
-      if (job.status === "failed" || job.status === "canceled") return job;
+      if (job.status === "failed" || job.status === "canceled") {
+        await refreshProjectScenes();
+        return job;
+      }
     }
     return null;
+  }
+
+  async function decideQc(scene: Scene, decision: "approve" | "reject") {
+    if (scene.status !== "quality_check") {
+      setNotice("Cảnh không còn ở trạng thái chờ QC. Hãy tải lại dự án trước khi thử tiếp.");
+      return;
+    }
+    if (
+      decision === "reject" &&
+      !window.confirm("Từ chối cảnh này? Cảnh kế tiếp sẽ tiếp tục bị khóa cho đến khi bạn tạo lại và duyệt cảnh.")
+    ) {
+      return;
+    }
+
+    setPendingSceneAction({ sceneId: scene.id, action: decision });
+    try {
+      if (!signedIn || scene.id.startsWith("scene_demo")) {
+        setScenes((current) => current.map((item) => item.id === scene.id
+          ? { ...item, status: decision === "approve" ? "approved" : "rejected" }
+          : item));
+      } else {
+        const { scene: updated } = await requestJson<QcResponse>(`/api/scenes/${scene.id}/qc`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ decision }),
+        });
+        setScenes((current) => current.map((item) => item.id === updated.id ? updated : item));
+      }
+      setNotice(
+        decision === "approve"
+          ? `Đã duyệt cảnh ${scene.sceneIndex}. Cảnh kế tiếp đã được mở khóa để tạo.`
+          : `Đã từ chối cảnh ${scene.sceneIndex}. Media cũ được giữ để đối chiếu; cảnh kế tiếp vẫn bị khóa.`,
+      );
+    } catch (error) {
+      setNotice(readableError(error));
+      await refreshProjectScenes().catch(() => null);
+    } finally {
+      setPendingSceneAction((current) => current?.sceneId === scene.id ? null : current);
+    }
   }
 
   async function runPipeline() {
     setBusy(true);
     try {
+      const pipelineAction = getPipelineActionPolicy(scenes, hasActiveGeneration);
+      if (pipelineAction.kind === "complete") {
+        setNotice("Tất cả cảnh đã được duyệt. Bạn có thể ghép video dài.");
+        return;
+      }
+      if (pipelineAction.kind === "wait_for_qc") {
+        setNotice(`Cảnh ${pipelineAction.scene.sceneIndex} đang chờ quyết định QC trước khi pipeline tiếp tục.`);
+        return;
+      }
+      if (pipelineAction.kind === "wait_for_generation") {
+        setNotice(pipelineAction.reason);
+        return;
+      }
+      if (pipelineAction.kind === "blocked") {
+        setNotice(pipelineAction.reason);
+        return;
+      }
+
+      const target = pipelineAction.scene;
       if (!signedIn || scenes.every((scene) => scene.id.startsWith("scene_demo"))) {
-        const target = scenes.find((scene, index) => {
-          if (["approved", "queued", "generating", "quality_check"].includes(scene.status)) return false;
-          return index === 0 || scenes[index - 1]?.status === "approved";
-        });
-        if (!target) {
-          setNotice("Pipeline đang chờ quyết định QC trước khi tạo cảnh tiếp theo.");
-          return;
-        }
         setNotice(`Đang mô phỏng cảnh ${target.sceneIndex}/${scenes.length} theo đúng thứ tự continuity.`);
         setScenes((current) => current.map((item) => item.id === target.id ? { ...item, status: "generating" } : item));
         await delay(520);
@@ -227,17 +309,13 @@ export default function StudioDashboard({ userName, signedIn }: StudioDashboardP
         return;
       }
 
-      for (const scene of scenes) {
-        if (scene.status === "approved") continue;
-        setNotice(`Đang gửi cảnh ${scene.sceneIndex}/${scenes.length} vào Veo; cảnh sau sẽ chờ frame nối.`);
-        const { job } = await requestJson<JobResponse>(`/api/scenes/${scene.id}/generate`, { method: "POST" });
-        setJobs((current) => [job, ...current.filter((item) => item.sceneId !== scene.id)]);
-        setScenes((current) => current.map((item) => item.id === scene.id ? { ...item, status: "queued" } : item));
-        const finished = await pollJob(job.id, scene.id);
-        if (!finished || finished.status !== "done") throw new Error(`Cảnh ${scene.sceneIndex} chưa hoàn tất; pipeline đã tạm dừng an toàn.`);
-        setNotice(`Cảnh ${scene.sceneIndex} đang chờ duyệt QC; pipeline đã dừng trước cảnh kế tiếp.`);
-        return;
-      }
+      setNotice(`Đang gửi cảnh ${target.sceneIndex}/${scenes.length} vào Veo; cảnh sau sẽ chờ frame nối.`);
+      const { job } = await requestJson<JobResponse>(`/api/scenes/${target.id}/generate`, { method: "POST" });
+      setJobs((current) => [job, ...current.filter((item) => item.sceneId !== target.id)]);
+      setScenes((current) => current.map((item) => item.id === target.id ? { ...item, status: "queued" } : item));
+      const finished = await pollJob(job.id, target.id);
+      if (!finished || finished.status !== "done") throw new Error(`Cảnh ${target.sceneIndex} chưa hoàn tất; pipeline đã tạm dừng an toàn.`);
+      setNotice(`Cảnh ${target.sceneIndex} đang chờ duyệt QC; pipeline đã dừng trước cảnh kế tiếp.`);
     } catch (error) {
       setNotice(readableError(error));
     } finally {
@@ -249,7 +327,7 @@ export default function StudioDashboard({ userName, signedIn }: StudioDashboardP
     const target = scenes.find((scene) => scene.id === sceneId);
     setScenes((current) => current.map((scene) => {
       if (scene.id === sceneId) return { ...scene, status: "generating" };
-      if (target?.status === "approved" && scene.sceneIndex > target.sceneIndex) {
+      if (target && ["approved", "rejected", "failed"].includes(target.status) && scene.sceneIndex > target.sceneIndex) {
         return { ...scene, status: "waiting_previous", startFrameUri: null, endFrameUri: null, outputVideoUri: null, qualityScore: null };
       }
       return scene;
@@ -394,19 +472,20 @@ export default function StudioDashboard({ userName, signedIn }: StudioDashboardP
           <div className="storyboard-track">
             {scenes.map((scene, index) => (
               <div className="scene-wrap" key={scene.id}>
-                <article className="scene-card">
-                  <div className={`scene-visual tone-${["one", "two", "three", "four"][index % 4]}`}>
-                    <span className="scene-number">{String(scene.sceneIndex).padStart(2, "0")}</span><span className="duration-pill">{scene.durationSeconds}s</span>
-                    <span className="visual-subject">{index === 3 ? "Hero frame" : "Identity locked"}</span>
-                    {["queued", "generating"].includes(scene.status) ? <div className="generation-overlay"><span className="spinner" /><strong>{jobProgress(jobs, scene.id)}%</strong><small>Veo Lower Priority</small></div> : null}
-                  </div>
-                  <div className="scene-content">
-                    <div className="scene-title-row"><h3>{scene.title}</h3><StatusPill status={scene.status} /></div>
-                    <p>{scene.action}</p>
-                    <div className="boundary-note"><strong>Kết cảnh:</strong> {scene.endState}</div>
-                    <div className="scene-actions"><button type="button" onClick={() => setNotice(scene.prompt)}>Xem prompt</button><button type="button" disabled={busy || scene.status === "quality_check"} onClick={() => generateScene(scene.id)}>Tạo lại</button></div>
-                  </div>
-                </article>
+                <SceneCard
+                  scene={scene}
+                  scenes={scenes}
+                  jobs={jobs}
+                  index={index}
+                  busy={busy}
+                  pendingAction={pendingSceneAction?.sceneId === scene.id ? pendingSceneAction.action : null}
+                  hasActiveGeneration={hasActiveGeneration}
+                  mediaUrl={sceneMediaUrl(scene, signedIn)}
+                  onShowPrompt={(selected) => setNotice(selected.prompt)}
+                  onGenerate={(selected) => { void generateScene(selected.id); }}
+                  onApprove={(selected) => { void decideQc(selected, "approve"); }}
+                  onReject={(selected) => { void decideQc(selected, "reject"); }}
+                />
                 {index < scenes.length - 1 ? <span className="scene-connector" aria-label="Frame nối">→</span> : null}
               </div>
             ))}
@@ -454,15 +533,6 @@ function WorkflowStep({ index, title, caption, status }: { index: string; title:
   return <li className={`workflow-step ${status}`}><span className="step-index">{status === "done" ? "✓" : index}</span><div><strong>{title}</strong><small>{caption}</small></div><span className="step-state">{status === "done" ? "Xong" : status === "active" ? "Đang chạy" : "Chờ"}</span></li>;
 }
 
-function StatusPill({ status }: { status: Scene["status"] }) {
-  const css = status === "approved" ? "completed" : status === "generating" ? "processing" : status === "waiting_previous" || status === "planned" ? "draft" : status === "rejected" ? "failed" : status;
-  return <span className={`status-pill status-${css}`}>{sceneStatusLabel(status)}</span>;
-}
-
-function sceneStatusLabel(status: Scene["status"]): string {
-  return ({ approved: "Đã duyệt", rejected: "Đã từ chối", generating: "Đang tạo", queued: "Đã xếp hàng", waiting_previous: "Chờ cảnh trước", planned: "Đã lên kế hoạch", quality_check: "Đang QC", failed: "Lỗi" } as Record<Scene["status"], string>)[status];
-}
-
 function statusLabel(status: GenerationJob["status"]): string {
   return ({ queued: "Đang chờ", running: "Đang tạo", done: "Hoàn tất", failed: "Lỗi", canceled: "Đã dừng" } as Record<GenerationJob["status"], string>)[status];
 }
@@ -471,12 +541,17 @@ function modelLabel(model: string): string {
   return model === "veo-3.1-standard" ? "Veo Standard" : model === "veo-3.1-fast" ? "Veo Fast" : "Veo 3.1 Lite";
 }
 
-function jobProgress(jobs: GenerationJob[], sceneId: string): number {
-  return jobs.find((job) => job.sceneId === sceneId)?.progress ?? 18;
-}
-
 function sceneNumber(scenes: Scene[], sceneId: string): string {
   return String(scenes.find((scene) => scene.id === sceneId)?.sceneIndex ?? "—").padStart(2, "0");
+}
+
+function sceneMediaUrl(scene: Scene, signedIn: boolean): string | null {
+  if (!scene.outputVideoUri || !["quality_check", "approved", "rejected"].includes(scene.status)) {
+    return null;
+  }
+  return !signedIn || scene.id.startsWith("scene_demo")
+    ? "/mock/sceneflow-preview.mp4"
+    : `/api/scenes/${encodeURIComponent(scene.id)}/media`;
 }
 
 async function uploadReference(projectId: string, kind: AssetKind, file: File | null) {
@@ -501,6 +576,14 @@ function errorLabel(code?: string): string | null {
     authentication_required: "Bạn cần đăng nhập để lưu và chạy dự án.",
     previous_scene_not_approved: "Cảnh trước chưa đạt QC nên cảnh này chưa thể chạy.",
     insufficient_credits: "Tài khoản không đủ credit để tạo cảnh này.",
+    scene_requires_qc_decision: "Hãy duyệt hoặc từ chối cảnh trước khi tạo lại.",
+    scene_media_not_ready: "Video hoặc frame continuity chưa sẵn sàng để duyệt.",
+    invalid_scene_transition: "Trạng thái cảnh đã thay đổi. Hãy tải lại dự án và thử lại.",
+    project_generation_in_progress: "Dự án đang có một cảnh được tạo. Vui lòng chờ hoàn tất.",
+    project_render_in_progress: "Dự án đang ghép video nên chưa thể tạo cảnh mới.",
+    provider_submission_uncertain: "Provider chưa xác nhận yêu cầu. Hệ thống đã khóa gửi lại để tránh tạo trùng.",
+    provider_submission_failed: "Provider từ chối yêu cầu; credit đã được hoàn lại.",
+    generation_in_progress: "Hãy chờ cảnh đang tạo hoàn tất trước khi ghép video.",
     scenes_not_ready: "Mọi cảnh phải hoàn tất trước khi ghép.",
     media_storage_unavailable: "Kho ảnh tham chiếu chưa sẵn sàng.",
   };

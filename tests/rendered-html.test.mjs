@@ -59,3 +59,51 @@ test("guards final rendering by approval and reuses an active render", () => {
   assert.match(renderRoute, /status: "failed"/);
   assert.match(repository, /inArray\(finalRendersTable\.status, \["queued", "running"\]\)/);
 });
+
+test("wires manual QC controls, continuity locking and private scene playback", () => {
+  const dashboard = readProjectFile("app/components/StudioDashboard.tsx");
+  const sceneCard = readProjectFile("app/components/SceneCard.tsx");
+  const actionPolicy = readProjectFile("app/components/scene-action-policy.ts");
+  const mediaRoute = readProjectFile("app/api/scenes/[id]/media/route.ts");
+  const privateVideoResponse = readProjectFile("lib/private-video-response.ts");
+
+  assert.match(sceneCard, /Duyệt cảnh/);
+  assert.match(sceneCard, /Từ chối/);
+  assert.match(sceneCard, /scene-preview/);
+  assert.match(dashboard, /\/api\/scenes\/\$\{scene\.id\}\/qc/);
+  assert.match(dashboard, /refreshProjectScenes/);
+  assert.match(dashboard, /getPipelineActionPolicy\(scenes, hasActiveGeneration\)/);
+  assert.match(actionPolicy, /dependsOnSceneId/);
+  assert.match(actionPolicy, /candidate\.status === "approved"/);
+  assert.match(actionPolicy, /scene\.outputVideoUri && scene\.endFrameUri/);
+  assert.match(actionPolicy, /kind: "wait_for_qc"/);
+  assert.match(mediaRoute, /getOwnedScene/);
+  assert.match(mediaRoute, /fetchPrivateGcsObject/);
+  assert.match(mediaRoute, /parseSingleByteRange\(request\.headers\.get\("range"\)\)/);
+  assert.match(mediaRoute, /parsedRange\.range\?\.headerValue/);
+  assert.match(mediaRoute, /return await createPrivateVideoResponse/);
+  assert.match(mediaRoute, /createMediaUpstreamFailedResponse/);
+  assert.ok(
+    mediaRoute.indexOf("const user = await getChatGPTUser()")
+      < mediaRoute.indexOf("const parsedRange = parseSingleByteRange"),
+    "scene media must authenticate before validating Range",
+  );
+  assert.ok(
+    mediaRoute.indexOf("const scene = await getOwnedScene")
+      < mediaRoute.indexOf("const parsedRange = parseSingleByteRange"),
+    "scene media must check ownership before validating Range",
+  );
+  assert.ok(
+    mediaRoute.indexOf("scene.outputVideoUri?.startsWith(\"mock://\")")
+      < mediaRoute.indexOf("const parsedRange = parseSingleByteRange"),
+    "mock media must redirect before validating Range",
+  );
+  assert.ok(
+    mediaRoute.indexOf("if (!parsedRange.ok)")
+      < mediaRoute.indexOf("const upstream = await fetchPrivateGcsObject"),
+    "invalid Range must return locally before any GCS fetch",
+  );
+  assert.match(privateVideoResponse, /contentType !== "video\/mp4"/);
+  assert.match(privateVideoResponse, /upstream\.status === 416/);
+  assert.match(privateVideoResponse, /"cache-control": "private, no-store"/);
+});

@@ -229,7 +229,7 @@ if (!value.startsWith("/") || value.startsWith("//")) return "/";
 
 ### StudioDashboard (known debt)
 
-`StudioDashboard.tsx` hiện 540 dòng — đây là tech debt đã biết. Khi refactor (phải hỏi trước), tách thành:
+`StudioDashboard.tsx` hiện 626 dòng tại baseline Checkpoint 2.3 — đây là tech debt đã biết. Khi refactor (phải hỏi trước), tách thành:
 - `StudioSidebar` — navigation
 - `ProjectForm` — tạo/sửa project
 - `SceneList` — danh sách cảnh với status

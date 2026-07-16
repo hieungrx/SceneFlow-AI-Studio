@@ -95,7 +95,7 @@ Chi tiết conventions cho từng layer → xem `CONVENTIONS.md`.
 
 ## 7. Trạng thái hiện tại
 
-**Đã hoàn thành (MVP):** Studio UI · quản lý project · prompt compiler · Story Bible + storyboard 4 cảnh · pipeline tạo cảnh tuần tự · mock QC + khóa frame nối cảnh · D1/R2 + kiểm tra quyền sở hữu dữ liệu · credit ledger append-only · mock Veo + adapter Vertex AI Veo thật · MP4 mẫu phát được · renderer FFmpeg + API contract cho Cloud Run · API tương đối đầy đủ cho pipeline · CI cơ bản. Lint, production build, 3 test và kiểm tra renderer đều PASS tại thời điểm viết file này.
+**Đã hoàn thành (MVP):** Studio UI · quản lý project · prompt compiler · Story Bible + storyboard 4 cảnh · pipeline tạo cảnh tuần tự · manual QC + khóa frame nối cảnh + private scene playback · D1/R2 + kiểm tra quyền sở hữu dữ liệu · credit ledger append-only · mock Veo + adapter Vertex AI Veo thật · MP4 mẫu phát được · renderer FFmpeg + API contract cho Cloud Run · API tương đối đầy đủ cho pipeline · CI cơ bản. Lint, production build, 141 test/subtest và kiểm tra renderer đều PASS tại baseline Checkpoint 2.3 ngày 2026-07-17.
 
 **Còn thiếu trước production — không coi các mục này là "đã ổn":**
 - Triển khai renderer FFmpeg lên Cloud Run thật
@@ -108,7 +108,7 @@ Chi tiết conventions cho từng layer → xem `CONVENTIONS.md`.
 - QC thực tế — phần hiện tại chủ yếu là nền tảng/mô phỏng
 - Quota Veo đủ cho ~100 video/ngày nếu đó là mục tiêu
 - Error boundaries và error handling UI phía client
-- Tách `StudioDashboard.tsx` (540 dòng) thành nhiều component nhỏ hơn
+- Tách `StudioDashboard.tsx` (626 dòng) thành nhiều component nhỏ hơn
 - Xác thực magic bytes/file signature cho ảnh upload; hiện MVP mới kiểm tra MIME metadata từ `File.type`
 
 **⚠️ Quy tắc kiểm tra trạng thái Git — đọc trước khi chạy bất kỳ lệnh git nào:**

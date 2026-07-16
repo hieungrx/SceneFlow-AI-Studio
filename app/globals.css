@@ -998,6 +998,21 @@ textarea::placeholder {
 .scene-visual.tone-three { --scene-bg: linear-gradient(135deg, #281b1c, #82523a 48%, #e4b36d); }
 .scene-visual.tone-four { --scene-bg: linear-gradient(135deg, #e4c49e, #97694b 52%, #34221c); }
 
+.scene-visual.has-preview::before,
+.scene-visual.has-preview::after {
+  display: none;
+}
+
+.scene-preview {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #17131d;
+  object-fit: cover;
+}
+
 .scene-number,
 .duration-pill {
   position: absolute;
@@ -1013,6 +1028,12 @@ textarea::placeholder {
 
 .scene-number { left: 10px; }
 .duration-pill { right: 10px; }
+
+.has-preview .scene-number,
+.has-preview .duration-pill {
+  z-index: 2;
+  pointer-events: none;
+}
 
 .visual-subject {
   display: flex;
@@ -1137,6 +1158,56 @@ textarea::placeholder {
 
 .scene-actions button:last-child {
   color: #938b9e;
+}
+
+.scene-actions button:disabled,
+.qc-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+.qc-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.qc-actions button {
+  min-height: 30px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  font-size: 8px;
+  font-weight: 850;
+}
+
+.qc-approve-button {
+  color: #116b4d;
+  border-color: #b8e2d2 !important;
+  background: #e5f7ef;
+}
+
+.qc-approve-button:hover:not(:disabled) {
+  background: #d7f1e6;
+}
+
+.qc-reject-button {
+  color: #a53c49;
+  border-color: #efc3c9 !important;
+  background: #fff0f2;
+}
+
+.qc-reject-button:hover:not(:disabled) {
+  background: #ffe3e7;
+}
+
+.scene-action-hint {
+  display: block;
+  min-height: 20px;
+  margin-top: 6px;
+  color: #9a929f;
+  font-size: 7px;
+  line-height: 1.4;
 }
 
 .scene-connector {

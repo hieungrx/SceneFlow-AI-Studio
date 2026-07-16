@@ -298,6 +298,50 @@ test("manual QC API runtime behavior", async (t) => {
     assert.equal(scene.status, "quality_check");
   });
 
+  await t.test("owned scene media is private, redirects mock output, and supports playback reads", async () => {
+    const fixture = await createQualityCheckScene("scene-media@example.com");
+    const mediaUrl = `${baseUrl}/api/scenes/${fixture.scene.id}/media`;
+
+    const unauthenticated = await fetch(mediaUrl, { redirect: "manual" });
+    assert.equal(unauthenticated.status, 401);
+
+    const nonOwner = await fetch(mediaUrl, {
+      headers: { "oai-authenticated-user-email": "scene-media-other@example.com" },
+      redirect: "manual",
+    });
+    assert.equal(nonOwner.status, 404);
+
+    const malformedRangeRedirect = await fetch(mediaUrl, {
+      headers: {
+        "oai-authenticated-user-email": fixture.ownerId,
+        range: "bytes=0-1,2-3",
+      },
+      redirect: "manual",
+    });
+    assert.equal(malformedRangeRedirect.status, 307);
+    assert.match(
+      malformedRangeRedirect.headers.get("location") ?? "",
+      /\/mock\/sceneflow-preview\.mp4$/,
+    );
+
+    const redirect = await fetch(mediaUrl, {
+      headers: { "oai-authenticated-user-email": fixture.ownerId },
+      redirect: "manual",
+    });
+    assert.equal(redirect.status, 307);
+    assert.match(redirect.headers.get("location") ?? "", /\/mock\/sceneflow-preview\.mp4$/);
+
+    const playable = await fetch(mediaUrl, {
+      headers: {
+        "oai-authenticated-user-email": fixture.ownerId,
+        range: "bytes=0-31",
+      },
+    });
+    assert.ok(playable.status === 200 || playable.status === 206);
+    assert.match(playable.headers.get("content-type") ?? "", /video\/mp4/);
+    assert.ok((await playable.arrayBuffer()).byteLength > 0);
+  });
+
   await t.test("concurrent generation requests share one job and one credit debit", async () => {
     const fixture = await createStoryboard("generation-admission@example.com");
     const target = fixture.scenes[0];

@@ -112,10 +112,13 @@ Model mapping:
 - `POST /api/assets` — tải ảnh tham chiếu vào R2.
 - `POST /api/projects/:id/storyboard` — tạo chuỗi cảnh và dependency.
 - `POST /api/scenes/:id/generate` — gửi cảnh đủ điều kiện vào provider.
+- `GET /api/scenes/:id/media` — mở MP4 mock hoặc stream video GCS riêng tư của cảnh.
 - `GET /api/jobs/:id` — polling job mock hoặc Vertex AI.
 - `POST /api/projects/:id/render` — tạo render manifest sau khi mọi cảnh hoàn tất.
 - `GET /api/renders/:id/media` — mở MP4 mock hoặc stream video GCS riêng tư, hỗ trợ HTTP Range.
 - `GET /api/credits` — số dư credit hiện tại.
+
+Scene media chỉ nhận request không có `Range` hoặc đúng một byte range dạng `bytes=start-end`, `bytes=start-`, `bytes=-suffix`. Range sai hoặc nhiều range trả `416` trước khi truy cập GCS; response GCS chỉ được stream inline khi là `video/mp4` và trạng thái `200`/`206`/`416` nhất quán. Lỗi xác thực upstream, MIME hoặc giao thức đều được thu gọn thành lỗi `502` an toàn, không chuyển tiếp body lỗi của Google.
 
 ## Để chạy 100 video/ngày
 
