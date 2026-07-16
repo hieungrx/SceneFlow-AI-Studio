@@ -5,12 +5,26 @@ import { spawn } from "node:child_process";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { isIP } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Transform } from "node:stream";
+import { fileURLToPath } from "node:url";
+import {
+  EXTRACTION_REQUEST_VERSION,
+  buildExtractionBinding,
+  classifyOperationRecord,
+  completeProcessingRecord,
+  createProcessingRecord,
+  expectedExtractionOperationId,
+  extractionArtifactMetadata,
+  extractionOperationObject,
+  failProcessingRecord,
+  takeOverProcessingRecord,
+  validateExtractionArtifactMetadata,
+} from "./extraction-operation.mjs";
 
 const PORT = integerFromEnv("PORT", 8080, 1, 65_535);
 const AUTH_TOKEN = process.env.RENDERER_AUTH_TOKEN ?? "";
@@ -40,6 +54,15 @@ const DOWNLOAD_TIMEOUT_MS = integerFromEnv(
   1_000,
   900_000,
 );
+const EXTRACTION_HARD_TIMEOUT_MS = integerFromEnv(
+  "EXTRACTION_HARD_TIMEOUT_MS",
+  1_200_000,
+  60_000,
+  3_300_000,
+);
+const EXTRACTION_OPERATION_LEASE_MARGIN_MS = 300_000;
+const EXTRACTION_OPERATION_LEASE_MS =
+  EXTRACTION_HARD_TIMEOUT_MS + EXTRACTION_OPERATION_LEASE_MARGIN_MS;
 const MAX_CONCURRENT_JOBS = integerFromEnv("MAX_CONCURRENT_JOBS", 2, 1, 32);
 const MAX_LOG_BYTES = 65_536;
 const VIDEO_PRESETS = new Set([
@@ -73,6 +96,11 @@ const BLOCKED_UPLOAD_HEADERS = new Set([
 
 let activeJobs = 0;
 let cachedGcsToken = null;
+let runningServer = null;
+
+const IS_MAIN_MODULE =
+  typeof process.argv[1] === "string" &&
+  resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
 class HttpError extends Error {
   constructor(status, code, message) {
@@ -93,63 +121,74 @@ class CommandError extends Error {
   }
 }
 
-if (!AUTH_TOKEN) {
-  console.error("RENDERER_AUTH_TOKEN is required; refusing to start an unprotected renderer.");
-  process.exit(1);
+export function createRendererServer() {
+  const server = createServer(async (request, response) => {
+    const requestId = getRequestId(request);
+    setResponseHeaders(response, requestId);
+
+    try {
+      const url = new URL(request.url ?? "/", "http://renderer.local");
+
+      if (
+        request.method === "GET" &&
+        (url.pathname === "/health" || url.pathname === "/healthz" || url.pathname === "/healthz/")
+      ) {
+        sendJson(response, 200, {
+          ok: true,
+          service: "sceneflow-renderer",
+          activeJobs,
+          capacity: MAX_CONCURRENT_JOBS,
+        });
+        return;
+      }
+
+      if (request.method !== "POST") {
+        throw new HttpError(405, "method_not_allowed", "Only POST is allowed for this endpoint.");
+      }
+
+      authenticate(request);
+      const body = await readJsonBody(request);
+
+      if (url.pathname === "/extract-last-frame") {
+        await withJobSlot(() => extractLastFrame(body, requestId, response));
+        return;
+      }
+
+      if (url.pathname === "/render") {
+        await withJobSlot(() => renderVideo(body, requestId, response));
+        return;
+      }
+
+      throw new HttpError(404, "not_found", "Endpoint not found.");
+    } catch (error) {
+      handleError(error, requestId, response);
+    }
+  });
+
+  server.requestTimeout = Math.max(
+    COMMAND_TIMEOUT_MS + DOWNLOAD_TIMEOUT_MS + 30_000,
+    EXTRACTION_HARD_TIMEOUT_MS + 30_000,
+  );
+  server.headersTimeout = 30_000;
+  return server;
 }
 
-if (Buffer.byteLength(AUTH_TOKEN) < 24) {
-  console.warn("RENDERER_AUTH_TOKEN is shorter than the recommended 24 bytes.");
-}
-
-const server = createServer(async (request, response) => {
-  const requestId = getRequestId(request);
-  setResponseHeaders(response, requestId);
-
-  try {
-    const url = new URL(request.url ?? "/", "http://renderer.local");
-
-    if (
-      request.method === "GET" &&
-      (url.pathname === "/health" || url.pathname === "/healthz" || url.pathname === "/healthz/")
-    ) {
-      sendJson(response, 200, {
-        ok: true,
-        service: "sceneflow-renderer",
-        activeJobs,
-        capacity: MAX_CONCURRENT_JOBS,
-      });
-      return;
-    }
-
-    if (request.method !== "POST") {
-      throw new HttpError(405, "method_not_allowed", "Only POST is allowed for this endpoint.");
-    }
-
-    authenticate(request);
-    const body = await readJsonBody(request);
-
-    if (url.pathname === "/extract-last-frame") {
-      await withJobSlot(() => extractLastFrame(body, requestId, response));
-      return;
-    }
-
-    if (url.pathname === "/render") {
-      await withJobSlot(() => renderVideo(body, requestId, response));
-      return;
-    }
-
-    throw new HttpError(404, "not_found", "Endpoint not found.");
-  } catch (error) {
-    handleError(error, requestId, response);
+function startRendererServer() {
+  if (!AUTH_TOKEN) {
+    console.error("RENDERER_AUTH_TOKEN is required; refusing to start an unprotected renderer.");
+    process.exit(1);
   }
-});
+  if (Buffer.byteLength(AUTH_TOKEN) < 24) {
+    console.warn("RENDERER_AUTH_TOKEN is shorter than the recommended 24 bytes.");
+  }
+  const server = createRendererServer();
+  server.listen(PORT, "0.0.0.0", () => {
+    console.log(JSON.stringify({ event: "renderer_started", port: PORT }));
+  });
+  return server;
+}
 
-server.requestTimeout = COMMAND_TIMEOUT_MS + DOWNLOAD_TIMEOUT_MS + 30_000;
-server.headersTimeout = 30_000;
-server.listen(PORT, "0.0.0.0", () => {
-  console.log(JSON.stringify({ event: "renderer_started", port: PORT }));
-});
+if (IS_MAIN_MODULE) runningServer = startRendererServer();
 
 function integerFromEnv(name, fallback, minimum, maximum) {
   const raw = process.env[name];
@@ -255,19 +294,463 @@ async function withJobSlot(task) {
 }
 
 async function extractLastFrame(body, requestId, response) {
+  if (isExtractionV2Request(body)) {
+    await extractLastFrameV2(body, requestId, response);
+    return;
+  }
+  await extractLastFrameLegacy(body, requestId, response);
+}
+
+function isExtractionV2Request(body) {
+  return [
+    "requestVersion",
+    "operationId",
+    "projectId",
+    "sceneId",
+    "generationJobId",
+    "expectedContentType",
+  ].some((field) => body[field] !== undefined);
+}
+
+function parseExtractionV2Request(body) {
+  if (body.requestVersion !== EXTRACTION_REQUEST_VERSION) {
+    throw new HttpError(400, "invalid_request_version", "requestVersion must be 1.");
+  }
+  const projectId = requiredOperationIdentifier(body.projectId, "projectId");
+  const sceneId = requiredOperationIdentifier(body.sceneId, "sceneId");
+  const generationJobId = requiredOperationIdentifier(body.generationJobId, "generationJobId");
+  const expectedOperationId = expectedExtractionOperationId(generationJobId);
+  if (body.operationId !== expectedOperationId) {
+    throw new HttpError(
+      400,
+      "invalid_operation_binding",
+      "operationId does not match generationJobId.",
+    );
+  }
+  if (body.format !== undefined && body.format !== "jpeg") {
+    throw new HttpError(400, "invalid_operation_binding", "Contract v2 only supports JPEG output.");
+  }
+  if (body.expectedContentType !== "image/jpeg") {
+    throw new HttpError(
+      400,
+      "invalid_operation_binding",
+      "expectedContentType must be image/jpeg.",
+    );
+  }
+  if (body.outputUpload !== undefined) {
+    throw new HttpError(
+      400,
+      "invalid_operation_binding",
+      "Contract v2 requires outputGcsUri for durable idempotency.",
+    );
+  }
+  if (typeof body.videoUri !== "string") {
+    throw new HttpError(400, "invalid_operation_binding", "Contract v2 requires videoUri.");
+  }
+  const source = parseInputUri(body.videoUri, "videoUri");
+  const output = parseGcsUri(body.outputGcsUri, "outputGcsUri");
+  const expectedSuffix = `projects/${projectId}/frames/${sceneId}-${generationJobId}-last.jpg`;
+  if (output.object !== expectedSuffix && !output.object.endsWith(`/${expectedSuffix}`)) {
+    throw new HttpError(
+      400,
+      "invalid_operation_binding",
+      "outputGcsUri is not the deterministic continuity-frame path for this operation.",
+    );
+  }
+  const outputGcsUri = `gs://${output.bucket}/${output.object}`;
+  const binding = buildExtractionBinding({
+    operationId: body.operationId,
+    projectId,
+    sceneId,
+    generationJobId,
+    videoUri: body.videoUri,
+    outputGcsUri,
+  });
+  return {
+    binding,
+    source,
+    output,
+    operationLocation: {
+      kind: "gcs",
+      bucket: output.bucket,
+      object: extractionOperationObject(output.object, projectId, sceneId, generationJobId),
+    },
+  };
+}
+
+function requiredOperationIdentifier(value, field) {
+  if (typeof value !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(value)) {
+    throw new HttpError(
+      400,
+      "invalid_operation_binding",
+      `${field} must contain 1-128 safe identifier characters.`,
+    );
+  }
+  return value;
+}
+
+function resolveExtractionDependencies(overrides = {}) {
+  return {
+    now: () => Date.now(),
+    createOwnerToken: () => randomUUID(),
+    leaseDurationMs: EXTRACTION_OPERATION_LEASE_MS,
+    readOperationRecord,
+    writeOperationRecord,
+    inspectExtractionArtifact,
+    uploadExtractionArtifact,
+    downloadInput,
+    runCommand,
+    ...overrides,
+  };
+}
+
+export async function extractLastFrameV2(body, requestId, response, overrides = {}) {
+  const request = parseExtractionV2Request(body);
+  const dependencies = resolveExtractionDependencies(overrides);
+  const deadline = createOperationDeadline(EXTRACTION_HARD_TIMEOUT_MS);
+  let claim;
+  try {
+    claim = await claimExtractionOperation(request, deadline, dependencies);
+    if (claim.outcome === "processing") {
+      sendJson(response, 202, {
+        ok: true,
+        requestId,
+        operation: "extract-last-frame",
+        requestVersion: EXTRACTION_REQUEST_VERSION,
+        operationId: request.binding.operationId,
+        state: "processing",
+        retryAfterMs: Math.max(1_000, Math.min(30_000, claim.retryAfterMs)),
+      });
+      return;
+    }
+    if (claim.outcome === "failed") {
+      sendExtractionFailure(response, requestId, request.binding.operationId, claim.errorCode);
+      return;
+    }
+    if (claim.outcome === "completed") {
+      const artifact = await dependencies.inspectExtractionArtifact(request, deadline);
+      const recordedGeneration = String(claim.record.output?.generation ?? "");
+      if (!artifact.valid || artifact.generation !== recordedGeneration) {
+        const persisted = await persistCompletedArtifactFailure(
+          request,
+          claim,
+          deadline,
+          dependencies,
+        );
+        if (!persisted) {
+          throw new HttpError(
+            503,
+            "renderer_temporarily_unavailable",
+            "Completed extraction artifact could not be reconciled authoritatively.",
+          );
+        }
+        sendExtractionFailure(
+          response,
+          requestId,
+          request.binding.operationId,
+          "end_frame_extraction_failed",
+        );
+        return;
+      }
+      sendExtractionSuccess(
+        response,
+        200,
+        requestId,
+        request.binding,
+        claim.record.output,
+        artifact,
+        "replayed",
+      );
+      return;
+    }
+
+    await executeClaimedExtraction(
+      request,
+      claim,
+      deadline,
+      requestId,
+      response,
+      dependencies,
+    );
+  } finally {
+    deadline.dispose();
+  }
+}
+
+async function claimExtractionOperation(request, deadline, dependencies) {
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    deadline.assertActive();
+    const stored = await dependencies.readOperationRecord(request.operationLocation, deadline);
+    if (!stored) {
+      const ownerToken = dependencies.createOwnerToken();
+      const record = createProcessingRecord(
+        request.binding,
+        ownerToken,
+        dependencies.now(),
+        dependencies.leaseDurationMs,
+      );
+      const created = await dependencies.writeOperationRecord(
+        request.operationLocation,
+        record,
+        0,
+        deadline,
+      );
+      if (created.preconditionFailed) continue;
+      return {
+        outcome: "claimed",
+        disposition: "created",
+        ownerToken,
+        record,
+        generation: created.generation,
+      };
+    }
+
+    const classification = classifyOperationRecord(
+      stored.record,
+      request.binding,
+      dependencies.now(),
+    );
+    if (classification === "conflict") {
+      throw new HttpError(
+        409,
+        "idempotency_conflict",
+        "operationId is already bound to different extraction inputs.",
+      );
+    }
+    if (classification === "invalid") {
+      throw new HttpError(409, "operation_record_invalid", "The durable operation record is invalid.");
+    }
+    if (classification === "completed") {
+      return { outcome: "completed", record: stored.record, generation: stored.generation };
+    }
+    if (classification === "failed") {
+      return {
+        outcome: "failed",
+        errorCode: stored.record.errorCode ?? "end_frame_extraction_failed",
+      };
+    }
+    if (classification === "processing") {
+      return {
+        outcome: "processing",
+        retryAfterMs: Date.parse(stored.record.leaseExpiresAt) - dependencies.now(),
+      };
+    }
+
+    const existingArtifact = await dependencies.inspectExtractionArtifact(request, deadline);
+    const ownerToken = dependencies.createOwnerToken();
+    const takeover = takeOverProcessingRecord(
+      stored.record,
+      ownerToken,
+      dependencies.now(),
+      dependencies.leaseDurationMs,
+    );
+    const updated = await dependencies.writeOperationRecord(
+      request.operationLocation,
+      takeover,
+      stored.generation,
+      deadline,
+    );
+    if (updated.preconditionFailed) continue;
+    return {
+      outcome: "claimed",
+      disposition: existingArtifact.valid ? "reconciled" : "created",
+      ownerToken,
+      record: takeover,
+      generation: updated.generation,
+      existingArtifact,
+    };
+  }
+  throw new HttpError(
+    503,
+    "renderer_temporarily_unavailable",
+    "The extraction operation changed too frequently; retry later.",
+  );
+}
+
+async function executeClaimedExtraction(
+  request,
+  claim,
+  deadline,
+  requestId,
+  response,
+  dependencies,
+) {
+  let workdir;
+  let artifactUploadAttempted = false;
+  try {
+    const existingArtifact =
+      claim.existingArtifact ??
+      (await dependencies.inspectExtractionArtifact(request, deadline));
+    if (existingArtifact.exists && !existingArtifact.valid) {
+      const persisted = await persistExtractionFailure(
+        request,
+        claim,
+        deadline,
+        dependencies,
+      );
+      if (!persisted) {
+        throw new HttpError(
+          503,
+          "renderer_temporarily_unavailable",
+          "Invalid extraction artifact could not be recorded authoritatively.",
+        );
+      }
+      sendExtractionFailure(
+        response,
+        requestId,
+        request.binding.operationId,
+        "end_frame_extraction_failed",
+      );
+      return;
+    }
+    if (existingArtifact.valid) {
+      const completed = await persistExtractionCompletion(
+        request,
+        claim,
+        existingArtifact,
+        existingArtifact.output ?? null,
+        deadline,
+        dependencies,
+      );
+      sendExtractionSuccess(
+        response,
+        200,
+        requestId,
+        request.binding,
+        completed.output,
+        existingArtifact,
+        "reconciled",
+      );
+      return;
+    }
+
+    workdir = await mkdtemp(join(tmpdir(), "sceneflow-frame-v2-"));
+    const inputPath = join(workdir, "input.media");
+    const outputPath = join(workdir, "last-frame.jpg");
+    await dependencies.downloadInput(request.source, inputPath, MAX_INPUT_BYTES, deadline);
+
+    const sourceProbe = await probeMedia(inputPath, deadline, dependencies.runCommand);
+    requireVideoStream(sourceProbe, "videoUri");
+    await dependencies.runCommand(
+      "ffmpeg",
+      [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-y",
+        "-sseof",
+        "-0.1",
+        "-i",
+        inputPath,
+        "-map",
+        "0:v:0",
+        "-frames:v",
+        "1",
+        "-q:v",
+        "2",
+        outputPath,
+      ],
+      deadline,
+    );
+
+    const outputProbe = await probeMedia(outputPath, deadline, dependencies.runCommand);
+    const videoStream = requireVideoStream(outputProbe, "rendered frame");
+    await assertClaimOwner(request.operationLocation, claim, deadline, dependencies);
+    artifactUploadAttempted = true;
+    await dependencies.uploadExtractionArtifact(request, outputPath, deadline);
+    const artifact = await dependencies.inspectExtractionArtifact(request, deadline);
+    if (!artifact.valid) {
+      throw new HttpError(
+        422,
+        "extraction_artifact_invalid",
+        `Uploaded extraction artifact failed validation: ${artifact.reason}.`,
+      );
+    }
+    const output = {
+      contentType: "image/jpeg",
+      bytes: artifact.bytes,
+      width: videoStream.width,
+      height: videoStream.height,
+      durationSeconds: mediaDuration(sourceProbe),
+      generation: artifact.generation,
+      etag: artifact.etag,
+    };
+    const completed = await persistExtractionCompletion(
+      request,
+      claim,
+      artifact,
+      output,
+      deadline,
+      dependencies,
+    );
+    sendExtractionSuccess(
+      response,
+      claim.disposition === "created" ? 201 : 200,
+      requestId,
+      request.binding,
+      completed.output,
+      artifact,
+      claim.disposition,
+    );
+  } catch (error) {
+    const recovered = await tryRecoverUploadedArtifact(request, claim, dependencies);
+    if (recovered) {
+      sendExtractionSuccess(
+        response,
+        200,
+        requestId,
+        request.binding,
+        recovered.output,
+        recovered.artifact,
+        "reconciled",
+      );
+      return;
+    }
+    if (isDurableExtractionFailure(error)) {
+      const persisted = await persistExtractionFailureWithRecoveryDeadline(
+        request,
+        claim,
+        dependencies,
+      );
+      if (persisted) {
+        sendExtractionFailure(
+          response,
+          requestId,
+          request.binding.operationId,
+          "end_frame_extraction_failed",
+        );
+        return;
+      }
+    }
+    if (!artifactUploadAttempted) {
+      await expireClaimWithRecoveryDeadline(request, claim, dependencies);
+    }
+    throw new HttpError(
+      503,
+      "renderer_temporarily_unavailable",
+      "The extraction outcome is not authoritative yet; retry the same operationId.",
+    );
+  } finally {
+    if (workdir) await boundedCleanup(workdir);
+  }
+}
+
+async function extractLastFrameLegacy(body, requestId, response) {
   const source = parseInputUri(body.videoUri ?? body.videoUrl, "videoUri");
   const upload = parseOutputDestination(body);
   const format = optionalEnum(body.format, "format", ["jpeg", "png"], "jpeg");
   const extension = format === "jpeg" ? "jpg" : "png";
   const contentType = format === "jpeg" ? "image/jpeg" : "image/png";
+  const deadline = createOperationDeadline(EXTRACTION_HARD_TIMEOUT_MS);
   const workdir = await mkdtemp(join(tmpdir(), "sceneflow-frame-"));
 
   try {
     const inputPath = join(workdir, "input.media");
     const outputPath = join(workdir, `last-frame.${extension}`);
-    await downloadInput(source, inputPath, MAX_INPUT_BYTES);
+    await downloadInput(source, inputPath, MAX_INPUT_BYTES, deadline);
 
-    const sourceProbe = await probeMedia(inputPath);
+    const sourceProbe = await probeMedia(inputPath, deadline);
     requireVideoStream(sourceProbe, "videoUri");
 
     const formatArgs =
@@ -288,11 +771,11 @@ async function extractLastFrame(body, requestId, response) {
       "1",
       ...formatArgs,
       outputPath,
-    ]);
+    ], deadline);
 
-    const outputProbe = await probeMedia(outputPath);
+    const outputProbe = await probeMedia(outputPath, deadline);
     const videoStream = requireVideoStream(outputProbe, "rendered frame");
-    const uploaded = await uploadFile(upload, outputPath, contentType);
+    const uploaded = await uploadFile(upload, outputPath, contentType, deadline);
 
     sendJson(response, 200, {
       ok: true,
@@ -310,7 +793,569 @@ async function extractLastFrame(body, requestId, response) {
       },
     });
   } finally {
-    await rm(workdir, { recursive: true, force: true });
+    deadline.dispose();
+    await boundedCleanup(workdir);
+  }
+}
+
+function createOperationDeadline(durationMs) {
+  const controller = new AbortController();
+  const expiresAt = Date.now() + durationMs;
+  const timeout = setTimeout(() => {
+    controller.abort(new Error("Extraction hard deadline exceeded."));
+  }, durationMs);
+  timeout.unref?.();
+  return {
+    signal: controller.signal,
+    expiresAt,
+    remainingMs() {
+      return Math.max(0, expiresAt - Date.now());
+    },
+    assertActive() {
+      if (controller.signal.aborted || Date.now() >= expiresAt) {
+        throw new HttpError(
+          504,
+          "extraction_deadline_exceeded",
+          "Extraction exceeded its hard execution deadline.",
+        );
+      }
+    },
+    dispose() {
+      clearTimeout(timeout);
+    },
+  };
+}
+
+async function readOperationRecord(location, deadline) {
+  const metadata = await getGcsObjectMetadata(location, deadline);
+  if (!metadata) return null;
+  if (!/^[1-9][0-9]*$/.test(String(metadata.generation ?? ""))) {
+    throw new HttpError(502, "operation_record_invalid", "Operation record has no generation.");
+  }
+  const response = await readGcsObject(
+    location,
+    deadline,
+    { generation: String(metadata.generation) },
+    65_536,
+  );
+  if (response.status !== 200) {
+    throw new HttpError(
+      502,
+      "operation_record_read_failed",
+      `Operation record read returned HTTP ${response.status}.`,
+    );
+  }
+  let record;
+  try {
+    record = JSON.parse(response.body.toString("utf8"));
+  } catch {
+    throw new HttpError(502, "operation_record_invalid", "Operation record is not valid JSON.");
+  }
+  return { record, generation: String(metadata.generation) };
+}
+
+async function writeOperationRecord(location, record, expectedGeneration, deadline) {
+  deadline.assertActive();
+  const accessToken = await getGcsAccessToken(deadline);
+  const url = new URL(
+    `https://storage.googleapis.com/upload/storage/v1/b/${encodeURIComponent(location.bucket)}/o`,
+  );
+  url.searchParams.set("uploadType", "media");
+  url.searchParams.set("name", location.object);
+  url.searchParams.set("ifGenerationMatch", String(expectedGeneration));
+  const body = Buffer.from(JSON.stringify(record), "utf8");
+  const response = await gcsRequest(
+    url,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        "content-type": "application/json; charset=utf-8",
+        "content-length": body.length,
+      },
+      body,
+      maxResponseBytes: 65_536,
+    },
+    deadline,
+  );
+  if (response.status === 412) return { preconditionFailed: true };
+  if (response.status < 200 || response.status >= 300) {
+    throw new HttpError(
+      502,
+      "operation_record_write_failed",
+      `Operation record write returned HTTP ${response.status}.`,
+    );
+  }
+  const written = parseGcsJson(response.body, "operation record write");
+  if (!/^[1-9][0-9]*$/.test(String(written.generation ?? ""))) {
+    throw new HttpError(502, "operation_record_write_failed", "GCS omitted record generation.");
+  }
+  return { preconditionFailed: false, generation: String(written.generation) };
+}
+
+async function getGcsObjectMetadata(location, deadline) {
+  deadline.assertActive();
+  const accessToken = await getGcsAccessToken(deadline);
+  const url = new URL(
+    `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(location.bucket)}/o/${encodeURIComponent(location.object)}`,
+  );
+  const response = await gcsRequest(
+    url,
+    {
+      method: "GET",
+      headers: { authorization: `Bearer ${accessToken}` },
+      maxResponseBytes: 65_536,
+    },
+    deadline,
+  );
+  if (response.status === 404) return null;
+  if (response.status < 200 || response.status >= 300) {
+    throw new HttpError(
+      502,
+      "gcs_metadata_read_failed",
+      `GCS metadata read returned HTTP ${response.status}.`,
+    );
+  }
+  return parseGcsJson(response.body, "GCS metadata read");
+}
+
+async function readGcsObject(location, deadline, options = {}, maxResponseBytes = 65_536) {
+  deadline.assertActive();
+  const accessToken = await getGcsAccessToken(deadline);
+  const url = new URL(
+    `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(location.bucket)}/o/${encodeURIComponent(location.object)}`,
+  );
+  url.searchParams.set("alt", "media");
+  if (options.generation) url.searchParams.set("ifGenerationMatch", options.generation);
+  return gcsRequest(
+    url,
+    {
+      method: "GET",
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        ...(options.range ? { range: options.range } : {}),
+      },
+      maxResponseBytes,
+    },
+    deadline,
+  );
+}
+
+async function gcsRequest(url, options, deadline) {
+  deadline.assertActive();
+  const pinnedLookup = await createPinnedLookup(url, "GCS API", deadline);
+  deadline.assertActive();
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      deadline.signal.removeEventListener("abort", onAbort);
+      callback(value);
+    };
+    const request = httpsRequest(
+      url,
+      {
+        method: options.method,
+        headers: options.headers,
+        lookup: pinnedLookup,
+        timeout: Math.max(1, Math.min(DOWNLOAD_TIMEOUT_MS, deadline.remainingMs())),
+      },
+      (response) => {
+        const chunks = [];
+        let bytes = 0;
+        response.on("data", (chunk) => {
+          bytes += chunk.length;
+          if (bytes > options.maxResponseBytes) {
+            response.destroy(new Error("GCS response exceeded its size limit."));
+            return;
+          }
+          chunks.push(chunk);
+        });
+        response.on("end", () => {
+          finish(resolve, {
+            status: response.statusCode ?? 0,
+            headers: response.headers,
+            body: Buffer.concat(chunks),
+          });
+        });
+        response.on("error", (error) => finish(reject, gcsTransportError(error, deadline)));
+      },
+    );
+    const onAbort = () => request.destroy(new Error("Extraction hard deadline exceeded."));
+    deadline.signal.addEventListener("abort", onAbort, { once: true });
+    request.on("timeout", () => request.destroy(new Error("GCS request timed out.")));
+    request.on("error", (error) => finish(reject, gcsTransportError(error, deadline)));
+    if (options.body) request.end(options.body);
+    else request.end();
+  });
+}
+
+function gcsTransportError(error, deadline) {
+  if (deadline.signal.aborted || deadline.remainingMs() === 0) {
+    return new HttpError(
+      504,
+      "extraction_deadline_exceeded",
+      "Extraction exceeded its hard execution deadline.",
+    );
+  }
+  return new HttpError(502, "gcs_request_failed", `GCS request failed: ${error.message}`);
+}
+
+function parseGcsJson(buffer, operation) {
+  try {
+    return JSON.parse(buffer.toString("utf8"));
+  } catch {
+    throw new HttpError(502, "gcs_invalid_response", `${operation} returned invalid JSON.`);
+  }
+}
+
+async function inspectExtractionArtifact(request, deadline) {
+  const metadata = await getGcsObjectMetadata(request.output, deadline);
+  if (!metadata) return { exists: false, valid: false, reason: "missing" };
+  if (metadata.name !== request.output.object || metadata.bucket !== request.output.bucket) {
+    return { exists: true, valid: false, reason: "wrong_object_identity" };
+  }
+  const validation = validateExtractionArtifactMetadata(metadata, request.binding);
+  if (!validation.valid) return { exists: true, ...validation };
+  const first = await readGcsObject(
+    request.output,
+    deadline,
+    { generation: validation.generation, range: "bytes=0-2" },
+    16,
+  );
+  const lastOffset = validation.bytes - 2;
+  const last = await readGcsObject(
+    request.output,
+    deadline,
+    {
+      generation: validation.generation,
+      range: `bytes=${lastOffset}-${validation.bytes - 1}`,
+    },
+    16,
+  );
+  if (![200, 206].includes(first.status) || ![200, 206].includes(last.status)) {
+    return { exists: true, valid: false, reason: "magic_read_failed" };
+  }
+  if (
+    first.body.length < 3 ||
+    first.body[0] !== 0xff ||
+    first.body[1] !== 0xd8 ||
+    first.body[2] !== 0xff ||
+    last.body.length < 2 ||
+    last.body.at(-2) !== 0xff ||
+    last.body.at(-1) !== 0xd9
+  ) {
+    return { exists: true, valid: false, reason: "invalid_jpeg_magic" };
+  }
+  return { exists: true, ...validation };
+}
+
+async function uploadExtractionArtifact(request, filePath, deadline) {
+  deadline.assertActive();
+  const fileStat = await stat(filePath);
+  if (fileStat.size > 67_108_864) {
+    throw new HttpError(422, "rendered_frame_too_large", "Rendered JPEG exceeds 64 MiB.");
+  }
+  const file = await readFile(filePath);
+  if (
+    file.length < 5 ||
+    file[0] !== 0xff ||
+    file[1] !== 0xd8 ||
+    file[2] !== 0xff ||
+    file.at(-2) !== 0xff ||
+    file.at(-1) !== 0xd9
+  ) {
+    throw new HttpError(422, "invalid_rendered_frame", "FFmpeg output is not a complete JPEG.");
+  }
+  deadline.assertActive();
+  const accessToken = await getGcsAccessToken(deadline);
+  const boundary = `sceneflow-${randomUUID()}`;
+  const objectMetadata = Buffer.from(
+    JSON.stringify({
+      name: request.output.object,
+      contentType: "image/jpeg",
+      metadata: extractionArtifactMetadata(request.binding),
+    }),
+    "utf8",
+  );
+  const prefix = Buffer.from(
+    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n`,
+    "utf8",
+  );
+  const middle = Buffer.from(
+    `\r\n--${boundary}\r\nContent-Type: image/jpeg\r\n\r\n`,
+    "utf8",
+  );
+  const suffix = Buffer.from(`\r\n--${boundary}--\r\n`, "utf8");
+  const body = Buffer.concat([prefix, objectMetadata, middle, file, suffix]);
+  const url = new URL(
+    `https://storage.googleapis.com/upload/storage/v1/b/${encodeURIComponent(request.output.bucket)}/o`,
+  );
+  url.searchParams.set("uploadType", "multipart");
+  url.searchParams.set("ifGenerationMatch", "0");
+  const response = await gcsRequest(
+    url,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        "content-type": `multipart/related; boundary=${boundary}`,
+        "content-length": body.length,
+      },
+      body,
+      maxResponseBytes: 65_536,
+    },
+    deadline,
+  );
+  if (response.status === 412) return;
+  if (response.status < 200 || response.status >= 300) {
+    throw new HttpError(
+      502,
+      "output_upload_failed",
+      `Output upload returned HTTP ${response.status}.`,
+    );
+  }
+}
+
+async function assertClaimOwner(location, claim, deadline, dependencies) {
+  const stored = await dependencies.readOperationRecord(location, deadline);
+  if (
+    !stored ||
+    stored.record.state !== "processing" ||
+    stored.record.ownerToken !== claim.ownerToken
+  ) {
+    throw new HttpError(409, "operation_fence_lost", "Extraction operation ownership was lost.");
+  }
+  return stored;
+}
+
+async function persistExtractionCompletion(
+  request,
+  claim,
+  artifact,
+  output,
+  deadline,
+  dependencies,
+) {
+  const stored = await assertClaimOwner(
+    request.operationLocation,
+    claim,
+    deadline,
+    dependencies,
+  );
+  const resolvedOutput = output ?? {
+    contentType: "image/jpeg",
+    bytes: artifact.bytes,
+    width: null,
+    height: null,
+    durationSeconds: null,
+    generation: artifact.generation,
+    etag: artifact.etag,
+  };
+  const completed = completeProcessingRecord(
+    stored.record,
+    claim.ownerToken,
+    resolvedOutput,
+    dependencies.now(),
+  );
+  if (!completed) {
+    throw new HttpError(409, "operation_fence_lost", "Extraction operation ownership was lost.");
+  }
+  const written = await dependencies.writeOperationRecord(
+    request.operationLocation,
+    completed,
+    stored.generation,
+    deadline,
+  );
+  if (written.preconditionFailed) {
+    const authoritative = await dependencies.readOperationRecord(
+      request.operationLocation,
+      deadline,
+    );
+    if (authoritative?.record?.state === "completed") return authoritative.record;
+    throw new HttpError(409, "operation_fence_lost", "Extraction operation ownership was lost.");
+  }
+  return completed;
+}
+
+async function persistExtractionFailure(request, claim, deadline, dependencies) {
+  const stored = await assertClaimOwner(
+    request.operationLocation,
+    claim,
+    deadline,
+    dependencies,
+  );
+  const failed = failProcessingRecord(
+    stored.record,
+    claim.ownerToken,
+    "end_frame_extraction_failed",
+    dependencies.now(),
+  );
+  if (!failed) return false;
+  const written = await dependencies.writeOperationRecord(
+    request.operationLocation,
+    failed,
+    stored.generation,
+    deadline,
+  );
+  return !written.preconditionFailed;
+}
+
+async function persistCompletedArtifactFailure(request, claim, deadline, dependencies) {
+  const failed = {
+    ...claim.record,
+    state: "failed",
+    ownerToken: null,
+    leaseExpiresAt: null,
+    updatedAt: new Date(dependencies.now()).toISOString(),
+    output: null,
+    errorCode: "end_frame_extraction_failed",
+  };
+  const written = await dependencies.writeOperationRecord(
+    request.operationLocation,
+    failed,
+    claim.generation,
+    deadline,
+  );
+  if (!written.preconditionFailed) return true;
+  const authoritative = await dependencies.readOperationRecord(
+    request.operationLocation,
+    deadline,
+  );
+  return authoritative?.record?.state === "failed";
+}
+
+async function persistExtractionFailureWithRecoveryDeadline(request, claim, dependencies) {
+  const recoveryDeadline = createOperationDeadline(15_000);
+  try {
+    return await persistExtractionFailure(request, claim, recoveryDeadline, dependencies);
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        event: "extraction_failure_record_write_failed",
+        operationId: request.binding.operationId,
+        message: error instanceof Error ? error.message : "Unknown error",
+      }),
+    );
+    return false;
+  } finally {
+    recoveryDeadline.dispose();
+  }
+}
+
+async function expireClaimWithRecoveryDeadline(request, claim, dependencies) {
+  const recoveryDeadline = createOperationDeadline(15_000);
+  try {
+    const stored = await assertClaimOwner(
+      request.operationLocation,
+      claim,
+      recoveryDeadline,
+      dependencies,
+    );
+    const released = {
+      ...stored.record,
+      leaseExpiresAt: new Date(0).toISOString(),
+      updatedAt: new Date(dependencies.now()).toISOString(),
+    };
+    await dependencies.writeOperationRecord(
+      request.operationLocation,
+      released,
+      stored.generation,
+      recoveryDeadline,
+    );
+  } catch {
+    // Natural lease expiry remains the safe fallback if recovery coordination is unavailable.
+  } finally {
+    recoveryDeadline.dispose();
+  }
+}
+
+async function tryRecoverUploadedArtifact(request, claim, dependencies) {
+  const recoveryDeadline = createOperationDeadline(15_000);
+  try {
+    const artifact = await dependencies.inspectExtractionArtifact(request, recoveryDeadline);
+    if (!artifact.valid) return null;
+    const completed = await persistExtractionCompletion(
+      request,
+      claim,
+      artifact,
+      null,
+      recoveryDeadline,
+      dependencies,
+    );
+    return { artifact, output: completed.output };
+  } catch {
+    return null;
+  } finally {
+    recoveryDeadline.dispose();
+  }
+}
+
+function isDurableExtractionFailure(error) {
+  return (
+    error instanceof CommandError ||
+    (error instanceof HttpError && [400, 413, 422].includes(error.status))
+  );
+}
+
+function sendExtractionSuccess(
+  response,
+  status,
+  requestId,
+  binding,
+  output,
+  artifact,
+  disposition,
+) {
+  sendJson(response, status, {
+    ok: true,
+    requestId,
+    operation: "extract-last-frame",
+    requestVersion: EXTRACTION_REQUEST_VERSION,
+    operationId: binding.operationId,
+    state: "completed",
+    disposition,
+    outputUri: binding.outputGcsUri,
+    source: { durationSeconds: output?.durationSeconds ?? null },
+    output: {
+      contentType: "image/jpeg",
+      bytes: artifact.bytes,
+      width: output?.width ?? null,
+      height: output?.height ?? null,
+      generation: artifact.generation,
+      etag: artifact.etag,
+    },
+  });
+}
+
+function sendExtractionFailure(response, requestId, operationId, errorCode) {
+  sendJson(response, 422, {
+    ok: false,
+    requestId,
+    operation: "extract-last-frame",
+    requestVersion: EXTRACTION_REQUEST_VERSION,
+    operationId,
+    state: "failed",
+    error: {
+      code: errorCode || "end_frame_extraction_failed",
+      message: "The continuity frame could not be extracted.",
+    },
+  });
+}
+
+async function boundedCleanup(workdir) {
+  let timeout;
+  try {
+    await Promise.race([
+      rm(workdir, { recursive: true, force: true }),
+      new Promise((resolve) => {
+        timeout = setTimeout(resolve, 5_000);
+        timeout.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
   }
 }
 
@@ -682,12 +1727,13 @@ function optionalNumber(value, field, fallback, minimum, maximum) {
   return value;
 }
 
-async function downloadInput(source, destination, maxBytes) {
+async function downloadInput(source, destination, maxBytes, deadline) {
+  deadline?.assertActive();
   if (source.kind === "https") {
-    return downloadHttps(new URL(source.url), destination, maxBytes, {}, 0, true);
+    return downloadHttps(new URL(source.url), destination, maxBytes, {}, 0, true, deadline);
   }
 
-  const accessToken = await getGcsAccessToken();
+  const accessToken = await getGcsAccessToken(deadline);
   const url = new URL(
     `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(source.bucket)}/o/${encodeURIComponent(source.object)}?alt=media`,
   );
@@ -698,10 +1744,12 @@ async function downloadInput(source, destination, maxBytes) {
     { authorization: `Bearer ${accessToken}` },
     0,
     false,
+    deadline,
   );
 }
 
-async function getGcsAccessToken() {
+async function getGcsAccessToken(deadline) {
+  deadline?.assertActive();
   const now = Date.now();
   if (cachedGcsToken && cachedGcsToken.expiresAt > now + 60_000) {
     return cachedGcsToken.value;
@@ -711,6 +1759,13 @@ async function getGcsAccessToken() {
   if (override) return override;
 
   const metadata = await new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      deadline?.signal.removeEventListener("abort", onAbort);
+      callback(value);
+    };
     const request = httpRequest(
       {
         hostname: "metadata.google.internal",
@@ -718,7 +1773,7 @@ async function getGcsAccessToken() {
         method: "GET",
         path: "/computeMetadata/v1/instance/service-accounts/default/token",
         headers: { "metadata-flavor": "Google" },
-        timeout: 3_000,
+        timeout: deadline ? Math.max(1, Math.min(3_000, deadline.remainingMs())) : 3_000,
       },
       (response) => {
         const chunks = [];
@@ -729,21 +1784,30 @@ async function getGcsAccessToken() {
         });
         response.on("end", () => {
           if (response.statusCode !== 200 || bytes > 32_768) {
-            reject(new Error(`Metadata server returned ${response.statusCode ?? "no status"}.`));
+            finish(reject, new Error(`Metadata server returned ${response.statusCode ?? "no status"}.`));
             return;
           }
           try {
-            resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+            finish(resolve, JSON.parse(Buffer.concat(chunks).toString("utf8")));
           } catch {
-            reject(new Error("Metadata server returned invalid JSON."));
+            finish(reject, new Error("Metadata server returned invalid JSON."));
           }
         });
       },
     );
+    const onAbort = () => request.destroy(new Error("Extraction hard deadline exceeded."));
+    deadline?.signal.addEventListener("abort", onAbort, { once: true });
     request.on("timeout", () => request.destroy(new Error("Metadata token request timed out.")));
-    request.on("error", reject);
+    request.on("error", (error) => finish(reject, error));
     request.end();
   }).catch((error) => {
+    if (deadline?.signal.aborted) {
+      throw new HttpError(
+        504,
+        "extraction_deadline_exceeded",
+        "Extraction exceeded its hard execution deadline.",
+      );
+    }
     console.error(JSON.stringify({ event: "gcs_token_failed", message: error.message }));
     throw new HttpError(
       502,
@@ -766,23 +1830,50 @@ async function getGcsAccessToken() {
   return cachedGcsToken.value;
 }
 
-async function downloadHttps(url, destination, maxBytes, headers, redirects, allowRedirects) {
-  const pinnedLookup = await createPinnedLookup(url, "input URL");
+async function downloadHttps(
+  url,
+  destination,
+  maxBytes,
+  headers,
+  redirects,
+  allowRedirects,
+  deadline,
+) {
+  deadline?.assertActive();
+  const pinnedLookup = await createPinnedLookup(url, "input URL", deadline);
   const response = await new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      deadline?.signal.removeEventListener("abort", onAbort);
+      callback(value);
+    };
     const request = httpsRequest(
       url,
       {
         method: "GET",
         headers: { "user-agent": "sceneflow-renderer/0.1", ...headers },
         lookup: pinnedLookup,
-        timeout: DOWNLOAD_TIMEOUT_MS,
+        timeout: deadline
+          ? Math.max(1, Math.min(DOWNLOAD_TIMEOUT_MS, deadline.remainingMs()))
+          : DOWNLOAD_TIMEOUT_MS,
       },
-      resolve,
+      (incoming) => finish(resolve, incoming),
     );
+    const onAbort = () => request.destroy(new Error("Extraction hard deadline exceeded."));
+    deadline?.signal.addEventListener("abort", onAbort, { once: true });
     request.on("timeout", () => request.destroy(new Error("Input download timed out.")));
-    request.on("error", reject);
+    request.on("error", (error) => finish(reject, error));
     request.end();
   }).catch((error) => {
+    if (deadline?.signal.aborted) {
+      throw new HttpError(
+        504,
+        "extraction_deadline_exceeded",
+        "Extraction exceeded its hard execution deadline.",
+      );
+    }
     throw new HttpError(502, "input_download_failed", `Unable to download input: ${error.message}`);
   });
 
@@ -792,7 +1883,15 @@ async function downloadHttps(url, destination, maxBytes, headers, redirects, all
       throw new HttpError(502, "input_redirect_rejected", "Input download redirect was rejected.");
     }
     const redirected = assertHttpsUrl(new URL(response.headers.location, url).toString(), "redirect URL");
-    return downloadHttps(redirected, destination, maxBytes, headers, redirects + 1, true);
+    return downloadHttps(
+      redirected,
+      destination,
+      maxBytes,
+      headers,
+      redirects + 1,
+      true,
+      deadline,
+    );
   }
 
   if (response.statusCode !== 200) {
@@ -823,15 +1922,25 @@ async function downloadHttps(url, destination, maxBytes, headers, redirects, all
   });
 
   try {
-    await pipeline(response, limiter, createWriteStream(destination, { flags: "wx" }));
+    await pipeline(response, limiter, createWriteStream(destination, { flags: "wx" }), {
+      ...(deadline ? { signal: deadline.signal } : {}),
+    });
   } catch (error) {
     if (error instanceof HttpError) throw error;
+    if (deadline?.signal.aborted) {
+      throw new HttpError(
+        504,
+        "extraction_deadline_exceeded",
+        "Extraction exceeded its hard execution deadline.",
+      );
+    }
     throw new HttpError(502, "input_download_failed", `Input download failed: ${error.message}`);
   }
   return { bytes };
 }
 
-async function uploadFile(upload, filePath, contentType) {
+async function uploadFile(upload, filePath, contentType, deadline) {
+  deadline?.assertActive();
   const fileStat = await stat(filePath);
   let url;
   let method;
@@ -839,7 +1948,7 @@ async function uploadFile(upload, filePath, contentType) {
   let field;
 
   if (upload.kind === "gcs") {
-    const accessToken = await getGcsAccessToken();
+    const accessToken = await getGcsAccessToken(deadline);
     url = new URL(
       `https://storage.googleapis.com/upload/storage/v1/b/${encodeURIComponent(upload.bucket)}/o`,
     );
@@ -864,24 +1973,35 @@ async function uploadFile(upload, filePath, contentType) {
     };
   }
 
-  const pinnedLookup = await createPinnedLookup(url, field);
+  const pinnedLookup = await createPinnedLookup(url, field, deadline);
+  deadline?.assertActive();
 
   await new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      deadline?.signal.removeEventListener("abort", onAbort);
+      callback(value);
+    };
     const request = httpsRequest(
       url,
       {
         method,
         headers,
         lookup: pinnedLookup,
-        timeout: DOWNLOAD_TIMEOUT_MS,
+        timeout: deadline
+          ? Math.max(1, Math.min(DOWNLOAD_TIMEOUT_MS, deadline.remainingMs()))
+          : DOWNLOAD_TIMEOUT_MS,
       },
       (response) => {
         response.resume();
         response.on("end", () => {
           if (response.statusCode >= 200 && response.statusCode < 300) {
-            resolve();
+            finish(resolve);
           } else {
-            reject(
+            finish(
+              reject,
               new HttpError(
                 502,
                 "output_upload_failed",
@@ -892,15 +2012,24 @@ async function uploadFile(upload, filePath, contentType) {
         });
       },
     );
+    const onAbort = () => request.destroy(new Error("Extraction hard deadline exceeded."));
+    deadline?.signal.addEventListener("abort", onAbort, { once: true });
     request.on("timeout", () => request.destroy(new Error("Output upload timed out.")));
     request.on("error", (error) => {
-      reject(
-        error instanceof HttpError
+      finish(
+        reject,
+        deadline?.signal.aborted
+          ? new HttpError(
+              504,
+              "extraction_deadline_exceeded",
+              "Extraction exceeded its hard execution deadline.",
+            )
+          : error instanceof HttpError
           ? error
           : new HttpError(502, "output_upload_failed", `Output upload failed: ${error.message}`),
       );
     });
-    createReadStream(filePath).on("error", reject).pipe(request);
+    createReadStream(filePath).on("error", (error) => finish(reject, error)).pipe(request);
   });
 
   return {
@@ -909,7 +2038,8 @@ async function uploadFile(upload, filePath, contentType) {
   };
 }
 
-async function createPinnedLookup(url, field) {
+async function createPinnedLookup(url, field, deadline) {
+  deadline?.assertActive();
   const hostname = url.hostname.replace(/^\[(.*)\]$/, "$1");
   if (isIP(hostname)) {
     if (isPrivateIpLiteral(hostname)) {
@@ -924,10 +2054,38 @@ async function createPinnedLookup(url, field) {
 
   let records;
   try {
-    records = await dnsLookup(hostname, { all: true, verbatim: true });
+    const lookupPromise = dnsLookup(hostname, { all: true, verbatim: true });
+    records = deadline
+      ? await Promise.race([
+          lookupPromise,
+          new Promise((_, reject) => {
+            const onAbort = () =>
+              reject(
+                new HttpError(
+                  504,
+                  "extraction_deadline_exceeded",
+                  "Extraction exceeded its hard execution deadline.",
+                ),
+              );
+            deadline.signal.addEventListener("abort", onAbort, { once: true });
+            lookupPromise.then(
+              () => deadline.signal.removeEventListener("abort", onAbort),
+              () => deadline.signal.removeEventListener("abort", onAbort),
+            );
+          }),
+        ])
+      : await lookupPromise;
   } catch {
+    if (deadline?.signal.aborted) {
+      throw new HttpError(
+        504,
+        "extraction_deadline_exceeded",
+        "Extraction exceeded its hard execution deadline.",
+      );
+    }
     throw new HttpError(502, "dns_resolution_failed", `${field} hostname could not be resolved.`);
   }
+  deadline?.assertActive();
   if (
     records.length === 0 ||
     records.some((record) => isPrivateIpLiteral(record.address))
@@ -941,8 +2099,8 @@ async function createPinnedLookup(url, field) {
   };
 }
 
-async function probeMedia(filePath) {
-  const { stdout } = await runCommand("ffprobe", [
+async function probeMedia(filePath, deadline, commandRunner = runCommand) {
+  const { stdout } = await commandRunner("ffprobe", [
     "-v",
     "error",
     "-show_streams",
@@ -950,7 +2108,7 @@ async function probeMedia(filePath) {
     "-of",
     "json",
     filePath,
-  ]);
+  ], deadline);
   try {
     return JSON.parse(stdout);
   } catch {
@@ -1146,17 +2304,21 @@ async function joinClips(options) {
   await runCommand("ffmpeg", args);
 }
 
-async function runCommand(command, args) {
+async function runCommand(command, args, deadline) {
+  deadline?.assertActive();
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       shell: false,
       windowsHide: true,
+      detached: process.platform !== "win32",
       stdio: ["ignore", "pipe", "pipe"],
     });
     const stdout = [];
     const stderr = [];
     let stdoutBytes = 0;
     let stderrBytes = 0;
+    let terminalError = null;
+    let settled = false;
 
     child.stdout.on("data", (chunk) => {
       if (stdoutBytes < MAX_LOG_BYTES) {
@@ -1171,20 +2333,61 @@ async function runCommand(command, args) {
       }
     });
 
-    const timeout = setTimeout(() => {
+    const killChildTree = () => {
+      if (process.platform !== "win32" && child.pid) {
+        try {
+          process.kill(-child.pid, "SIGKILL");
+          return;
+        } catch {
+          // Fall through to the direct child kill.
+        }
+      }
       child.kill("SIGKILL");
-      reject(new HttpError(504, "command_timeout", `${command} exceeded the execution timeout.`));
-    }, COMMAND_TIMEOUT_MS);
+    };
+    const commandTimeout = Math.max(
+      1,
+      Math.min(COMMAND_TIMEOUT_MS, deadline?.remainingMs() ?? COMMAND_TIMEOUT_MS),
+    );
+    const timeout = setTimeout(() => {
+      terminalError = deadline?.signal.aborted
+        ? new HttpError(
+            504,
+            "extraction_deadline_exceeded",
+            "Extraction exceeded its hard execution deadline.",
+          )
+        : new HttpError(504, "command_timeout", `${command} exceeded the execution timeout.`);
+      killChildTree();
+    }, commandTimeout);
+    const onAbort = () => {
+      terminalError = new HttpError(
+        504,
+        "extraction_deadline_exceeded",
+        "Extraction exceeded its hard execution deadline.",
+      );
+      killChildTree();
+    };
+    deadline?.signal.addEventListener("abort", onAbort, { once: true });
+
+    const cleanup = () => {
+      clearTimeout(timeout);
+      deadline?.signal.removeEventListener("abort", onAbort);
+    };
 
     child.on("error", (error) => {
-      clearTimeout(timeout);
+      if (settled) return;
+      settled = true;
+      cleanup();
       reject(new HttpError(500, "command_unavailable", `${command} is not available: ${error.message}`));
     });
     child.on("close", (code) => {
-      clearTimeout(timeout);
+      if (settled) return;
+      settled = true;
+      cleanup();
       const output = Buffer.concat(stdout).toString("utf8");
       const errorOutput = Buffer.concat(stderr).toString("utf8");
-      if (code === 0) {
+      if (terminalError) {
+        reject(terminalError);
+      } else if (code === 0) {
         resolve({ stdout: output, stderr: errorOutput });
       } else {
         reject(new CommandError(command, code, errorOutput));
@@ -1242,9 +2445,14 @@ function handleError(error, requestId, response) {
 
 function shutdown(signal) {
   console.log(JSON.stringify({ event: "renderer_shutdown", signal }));
-  server.close(() => process.exit(0));
+  if (!runningServer) {
+    process.exit(0);
+  }
+  runningServer.close(() => process.exit(0));
   setTimeout(() => process.exit(1), 10_000).unref();
 }
 
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
+if (IS_MAIN_MODULE) {
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
+}

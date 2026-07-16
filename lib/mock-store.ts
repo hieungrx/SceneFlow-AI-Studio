@@ -1,10 +1,20 @@
 import { demoJobs, demoProject, demoScenes } from "./mock-data";
-import type { FinalRender, GenerationJob, Project, Scene } from "./types";
+import type {
+  ExtractionClaimKind,
+  FinalRender,
+  GenerationJob,
+  GenerationJobProcessingState,
+  Project,
+  Scene,
+} from "./types";
 
 const projects = new Map<string, Project>([[demoProject.id, demoProject]]);
 const scenes = new Map<string, Scene>(demoScenes.map((scene) => [scene.id, scene]));
-const jobs = new Map<string, GenerationJob>(demoJobs.map((job) => [job.id, job]));
+const jobs = new Map<string, GenerationJobProcessingState>(
+  demoJobs.map((job) => [job.id, processingStateFromJob(job)]),
+);
 const renders = new Map<string, FinalRender>();
+const EXTRACTION_CLAIM_TOKEN_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
 
 export function listProjects(ownerId?: string): Project[] {
   return [...projects.values()]
@@ -34,6 +44,44 @@ export function updateScene(id: string, patch: Partial<Scene>): Scene | null {
   const updated = { ...scene, ...patch };
   scenes.set(id, updated);
   return updated;
+}
+
+export function transitionSceneFromStatus(
+  id: string,
+  expectedStatus: Scene["status"],
+  patch: Partial<Scene>,
+): Scene | null {
+  const scene = scenes.get(id);
+  if (!scene || scene.status !== expectedStatus) return null;
+  return updateScene(id, patch);
+}
+
+export function transitionSceneFromStatusForJobClaim(
+  sceneId: string,
+  expectedStatus: Scene["status"],
+  jobId: string,
+  expectedClaimToken: string,
+  expectedClaimKind: ExtractionClaimKind,
+  patch: Partial<Scene>,
+): Scene | null {
+  const scene = scenes.get(sceneId);
+  const job = jobs.get(jobId);
+  if (
+    !scene ||
+    scene.status !== expectedStatus ||
+    !job ||
+    job.sceneId !== sceneId ||
+    job.projectId !== scene.projectId ||
+    (job.status !== "queued" && job.status !== "running") ||
+    job.extractionClaimToken !== expectedClaimToken ||
+    job.extractionClaimKind !== expectedClaimKind ||
+    (expectedClaimKind === "completion"
+      ? job.extractionFailureCode !== null
+      : job.extractionFailureCode !== "end_frame_extraction_failed")
+  ) {
+    return null;
+  }
+  return updateScene(sceneId, patch);
 }
 
 export function createProject(
@@ -69,24 +117,56 @@ export function saveScenes(projectId: string, nextScenes: Scene[]): Scene[] {
   return getProjectScenes(projectId);
 }
 
-export function saveJob(job: GenerationJob): GenerationJob {
-  jobs.set(job.id, job);
-  return job;
+export function saveJob(job: GenerationJob): GenerationJobProcessingState {
+  const processingState = processingStateFromJob(job);
+  jobs.set(job.id, processingState);
+  return processingState;
 }
 
-export function getJob(id: string): GenerationJob | null {
+export function getJob(id: string): GenerationJobProcessingState | null {
   return jobs.get(id) ?? null;
 }
 
-export function updateJob(id: string, patch: Partial<GenerationJob>): GenerationJob | null {
+export function updateJob(
+  id: string,
+  patch: Partial<GenerationJobProcessingState>,
+): GenerationJobProcessingState | null {
   const job = jobs.get(id);
   if (!job) return null;
-  const updated = { ...job, ...patch, updatedAt: new Date().toISOString() };
+  const updated: GenerationJobProcessingState = {
+    ...job,
+    ...patch,
+    stateVersion: job.stateVersion + 1,
+    updatedAt: new Date().toISOString(),
+  };
   jobs.set(id, updated);
   return updated;
 }
 
-export function findActiveJobForScene(sceneId: string): GenerationJob | null {
+export function transitionJobFromSnapshot(
+  id: string,
+  expected: Pick<GenerationJobProcessingState, "status" | "stateVersion">,
+  patch: Partial<GenerationJobProcessingState>,
+): GenerationJobProcessingState | null {
+  if (
+    patch.extractionClaimToken !== undefined &&
+    patch.extractionClaimToken !== null &&
+    !EXTRACTION_CLAIM_TOKEN_PATTERN.test(patch.extractionClaimToken)
+  ) {
+    return null;
+  }
+  const job = jobs.get(id);
+  if (
+    !job ||
+    job.status !== expected.status ||
+    job.stateVersion !== expected.stateVersion
+  ) {
+    return null;
+  }
+  return updateJob(id, patch);
+}
+
+export function findActiveJobForScene(sceneId: string): GenerationJobProcessingState | null {
   return [...jobs.values()].find(
     (job) => job.sceneId === sceneId && (job.status === "queued" || job.status === "running"),
   ) ?? null;
@@ -117,4 +197,16 @@ export function updateRender(id: string, patch: Partial<FinalRender>): FinalRend
   const updated = { ...render, ...patch, updatedAt: new Date().toISOString() };
   renders.set(id, updated);
   return updated;
+}
+
+function processingStateFromJob(job: GenerationJob): GenerationJobProcessingState {
+  const processingState = job as Partial<GenerationJobProcessingState>;
+  return {
+    ...job,
+    extractionClaimToken: processingState.extractionClaimToken ?? null,
+    extractionClaimKind: processingState.extractionClaimKind ?? null,
+    extractionClaimExpiresAt: processingState.extractionClaimExpiresAt ?? null,
+    extractionFailureCode: processingState.extractionFailureCode ?? null,
+    stateVersion: processingState.stateVersion ?? 0,
+  };
 }

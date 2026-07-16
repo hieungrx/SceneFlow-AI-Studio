@@ -1,4 +1,4 @@
-import { and, desc, eq, gt, inArray } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, sql } from "drizzle-orm";
 import { getDb } from "../db";
 import { ensureDatabaseSchema } from "../db/bootstrap";
 import {
@@ -11,13 +11,24 @@ import {
   users as usersTable,
 } from "../db/schema";
 import * as memory from "./mock-store";
-import type { AssetRecord, FinalRender, GenerationJob, Project, Scene, StoryBible } from "./types";
+import type {
+  AssetRecord,
+  ExtractionClaimKind,
+  FinalRender,
+  GenerationJob,
+  GenerationJobProcessingState,
+  Project,
+  Scene,
+  StoryBible,
+} from "./types";
 
 type Db = ReturnType<typeof getDb>;
 type ProjectInput = Pick<
   Project,
   "name" | "brief" | "template" | "aspectRatio" | "targetDurationSeconds" | "model"
 >;
+
+const EXTRACTION_CLAIM_TOKEN_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
 
 const DEFAULT_STORY_BIBLE: StoryBible = {
   characterLock: "Giữ nguyên khuôn mặt, tóc, vóc dáng và trang phục từ ảnh tham chiếu.",
@@ -255,6 +266,163 @@ export async function updateOwnedScene(
   );
 }
 
+export async function transitionOwnedSceneFromStatus(
+  ownerId: string,
+  sceneId: string,
+  expectedStatus: Scene["status"],
+  patch: Partial<Scene>,
+): Promise<Scene | null> {
+  const scene = await getOwnedScene(ownerId, sceneId);
+  if (!scene || scene.status !== expectedStatus) return null;
+  const now = new Date().toISOString();
+
+  return withMemoryFallback(
+    async (db) => {
+      const [row] = await db
+        .update(scenesTable)
+        .set({
+          ...(patch.status !== undefined ? { status: patch.status } : {}),
+          ...(patch.startState !== undefined ? { startState: patch.startState } : {}),
+          ...(patch.action !== undefined ? { action: patch.action } : {}),
+          ...(patch.endState !== undefined ? { endState: patch.endState } : {}),
+          ...(patch.prompt !== undefined ? { prompt: patch.prompt } : {}),
+          ...(patch.negativePrompt !== undefined ? { negativePrompt: patch.negativePrompt } : {}),
+          ...(patch.transition !== undefined ? { transition: patch.transition } : {}),
+          ...(patch.dependsOnSceneId !== undefined
+            ? { dependsOnSceneId: patch.dependsOnSceneId }
+            : {}),
+          ...(patch.startFrameUri !== undefined ? { startFrameKey: patch.startFrameUri } : {}),
+          ...(patch.endFrameUri !== undefined ? { endFrameKey: patch.endFrameUri } : {}),
+          ...(patch.outputVideoUri !== undefined
+            ? { outputVideoKey: patch.outputVideoUri }
+            : {}),
+          ...(patch.qualityScore !== undefined ? { qualityScore: patch.qualityScore } : {}),
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(scenesTable.id, sceneId),
+            eq(scenesTable.status, expectedStatus),
+            sql`exists (
+              select 1
+              from ${projectsTable}
+              where ${projectsTable.id} = ${scenesTable.projectId}
+                and ${projectsTable.ownerId} = ${ownerId}
+            )`,
+          ),
+        )
+        .returning();
+      return row ? sceneFromRow(row) : null;
+    },
+    () => {
+      const current = memory.getScene(sceneId);
+      if (
+        !current ||
+        !memory.getProject(current.projectId, ownerId)
+      ) {
+        return null;
+      }
+      return memory.transitionSceneFromStatus(sceneId, expectedStatus, patch);
+    },
+  );
+}
+
+export async function transitionOwnedSceneFromStatusForJobClaim(
+  ownerId: string,
+  sceneId: string,
+  expectedStatus: Scene["status"],
+  jobId: string,
+  expectedClaimToken: string,
+  expectedClaimKind: ExtractionClaimKind,
+  patch: Partial<Scene>,
+): Promise<Scene | null> {
+  const scene = await getOwnedScene(ownerId, sceneId);
+  const job = await getOwnedJobProcessingState(ownerId, jobId);
+  if (
+    !scene ||
+    scene.status !== expectedStatus ||
+    !job ||
+    job.sceneId !== sceneId ||
+    job.projectId !== scene.projectId ||
+    (job.status !== "queued" && job.status !== "running") ||
+    job.extractionClaimToken !== expectedClaimToken ||
+    job.extractionClaimKind !== expectedClaimKind ||
+    (expectedClaimKind === "completion"
+      ? job.extractionFailureCode !== null
+      : job.extractionFailureCode !== "end_frame_extraction_failed")
+  ) {
+    return null;
+  }
+  const now = new Date().toISOString();
+
+  return withMemoryFallback(
+    async (db) => {
+      const [row] = await db
+        .update(scenesTable)
+        .set({
+          ...(patch.status !== undefined ? { status: patch.status } : {}),
+          ...(patch.startState !== undefined ? { startState: patch.startState } : {}),
+          ...(patch.action !== undefined ? { action: patch.action } : {}),
+          ...(patch.endState !== undefined ? { endState: patch.endState } : {}),
+          ...(patch.prompt !== undefined ? { prompt: patch.prompt } : {}),
+          ...(patch.negativePrompt !== undefined ? { negativePrompt: patch.negativePrompt } : {}),
+          ...(patch.transition !== undefined ? { transition: patch.transition } : {}),
+          ...(patch.dependsOnSceneId !== undefined
+            ? { dependsOnSceneId: patch.dependsOnSceneId }
+            : {}),
+          ...(patch.startFrameUri !== undefined ? { startFrameKey: patch.startFrameUri } : {}),
+          ...(patch.endFrameUri !== undefined ? { endFrameKey: patch.endFrameUri } : {}),
+          ...(patch.outputVideoUri !== undefined
+            ? { outputVideoKey: patch.outputVideoUri }
+            : {}),
+          ...(patch.qualityScore !== undefined ? { qualityScore: patch.qualityScore } : {}),
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(scenesTable.id, sceneId),
+            eq(scenesTable.status, expectedStatus),
+            sql`exists (
+              select 1
+              from ${generationJobsTable}
+              where ${generationJobsTable.id} = ${jobId}
+                and ${generationJobsTable.sceneId} = ${sceneId}
+                and ${generationJobsTable.projectId} = ${scenesTable.projectId}
+                and ${generationJobsTable.status} in ('queued', 'running')
+                and ${generationJobsTable.extractionClaimToken} = ${expectedClaimToken}
+                and ${generationJobsTable.extractionClaimKind} = ${expectedClaimKind}
+                and ${
+                  expectedClaimKind === "completion"
+                    ? sql`${generationJobsTable.extractionFailureCode} is null`
+                    : sql`${generationJobsTable.extractionFailureCode} = 'end_frame_extraction_failed'`
+                }
+                and exists (
+                  select 1
+                  from ${projectsTable}
+                  where ${projectsTable.id} = ${generationJobsTable.projectId}
+                    and ${projectsTable.ownerId} = ${ownerId}
+                )
+            )`,
+          ),
+        )
+        .returning();
+      return row ? sceneFromRow(row) : null;
+    },
+    () => {
+      const current = memory.getScene(sceneId);
+      if (!current || !memory.getProject(current.projectId, ownerId)) return null;
+      return memory.transitionSceneFromStatusForJobClaim(
+        sceneId,
+        expectedStatus,
+        jobId,
+        expectedClaimToken,
+        expectedClaimKind,
+        patch,
+      );
+    },
+  );
+}
+
 export async function invalidateOwnedDownstreamScenes(
   ownerId: string,
   projectId: string,
@@ -322,7 +490,7 @@ export async function createOwnedJob(
       });
       return job;
     },
-    () => memory.saveJob(job),
+    () => generationJobFromProcessingState(memory.saveJob(job)),
   );
 }
 
@@ -344,9 +512,12 @@ export async function findOwnedActiveJobForScene(
         )
         .orderBy(desc(generationJobsTable.createdAt))
         .limit(1);
-      return row ? jobFromRow(row) : null;
+      return row ? generationJobFromProcessingState(processingJobFromRow(row)) : null;
     },
-    () => memory.findActiveJobForScene(sceneId),
+    () => {
+      const job = memory.findActiveJobForScene(sceneId);
+      return job ? generationJobFromProcessingState(job) : null;
+    },
   );
 }
 
@@ -524,15 +695,32 @@ export async function updateOwnedRender(
 }
 
 export async function getOwnedJob(ownerId: string, jobId: string): Promise<GenerationJob | null> {
+  const job = await getOwnedJobProcessingState(ownerId, jobId);
+  return job ? generationJobFromProcessingState(job) : null;
+}
+
+export async function getOwnedJobProcessingState(
+  ownerId: string,
+  jobId: string,
+): Promise<GenerationJobProcessingState | null> {
   return withMemoryFallback(
     async (db) => {
       const [row] = await db
         .select()
         .from(generationJobsTable)
-        .where(eq(generationJobsTable.id, jobId))
+        .where(
+          and(
+            eq(generationJobsTable.id, jobId),
+            sql`exists (
+              select 1
+              from ${projectsTable}
+              where ${projectsTable.id} = ${generationJobsTable.projectId}
+                and ${projectsTable.ownerId} = ${ownerId}
+            )`,
+          ),
+        )
         .limit(1);
-      if (!row || !(await getOwnedProject(ownerId, row.projectId))) return null;
-      return jobFromRow(row);
+      return row ? processingJobFromRow(row) : null;
     },
     () => {
       const job = memory.getJob(jobId);
@@ -542,67 +730,78 @@ export async function getOwnedJob(ownerId: string, jobId: string): Promise<Gener
   );
 }
 
-export async function updateOwnedJob(
+export async function transitionOwnedJobFromSnapshot(
   ownerId: string,
   jobId: string,
-  patch: Partial<GenerationJob>,
-): Promise<GenerationJob | null> {
-  const job = await getOwnedJob(ownerId, jobId);
-  if (!job) return null;
-  const updated: GenerationJob = { ...job, ...patch, updatedAt: new Date().toISOString() };
+  expected: Pick<GenerationJobProcessingState, "status" | "stateVersion">,
+  patch: Partial<GenerationJobProcessingState>,
+): Promise<GenerationJobProcessingState | null> {
+  if (
+    patch.extractionClaimToken !== undefined &&
+    patch.extractionClaimToken !== null &&
+    !EXTRACTION_CLAIM_TOKEN_PATTERN.test(patch.extractionClaimToken)
+  ) {
+    return null;
+  }
+  const job = await getOwnedJobProcessingState(ownerId, jobId);
+  if (!job || job.status !== expected.status || job.stateVersion !== expected.stateVersion) {
+    return null;
+  }
+  const updatedAt = new Date().toISOString();
+
   return withMemoryFallback(
     async (db) => {
-      await db
+      const [row] = await db
         .update(generationJobsTable)
         .set({
-          status: updated.status,
-          progress: updated.progress,
-          providerOperationId: updated.providerOperationId,
-          errorCode: updated.errorCode,
-          updatedAt: updated.updatedAt,
+          ...(patch.status !== undefined ? { status: patch.status } : {}),
+          ...(patch.progress !== undefined ? { progress: patch.progress } : {}),
+          ...(patch.providerOperationId !== undefined
+            ? { providerOperationId: patch.providerOperationId }
+            : {}),
+          ...(patch.errorCode !== undefined ? { errorCode: patch.errorCode } : {}),
+          ...(patch.extractionClaimToken !== undefined
+            ? { extractionClaimToken: patch.extractionClaimToken }
+            : {}),
+          ...(patch.extractionClaimKind !== undefined
+            ? { extractionClaimKind: patch.extractionClaimKind }
+            : {}),
+          ...(patch.extractionClaimExpiresAt !== undefined
+            ? { extractionClaimExpiresAt: patch.extractionClaimExpiresAt }
+            : {}),
+          ...(patch.extractionFailureCode !== undefined
+            ? { extractionFailureCode: patch.extractionFailureCode }
+            : {}),
+          stateVersion: sql`${generationJobsTable.stateVersion} + 1`,
+          updatedAt,
         })
-        .where(eq(generationJobsTable.id, jobId));
-      return updated;
-    },
-    () => memory.updateJob(jobId, patch),
-  );
-}
-
-export async function advanceOwnedMockJob(
-  ownerId: string,
-  jobId: string,
-): Promise<GenerationJob | null> {
-  const job = await getOwnedJob(ownerId, jobId);
-  if (!job || job.provider !== "mock" || ["done", "failed", "canceled"].includes(job.status)) return job;
-
-  const progress = job.status === "queued" ? 28 : Math.min(100, job.progress + 36);
-  const status = progress >= 100 ? "done" : "running";
-  const updated: GenerationJob = {
-    ...job,
-    status,
-    progress,
-    updatedAt: new Date().toISOString(),
-  };
-
-  await withMemoryFallback(
-    async (db) => {
-      await db
-        .update(generationJobsTable)
-        .set({ status, progress, updatedAt: updated.updatedAt })
-        .where(eq(generationJobsTable.id, jobId));
+        .where(
+          and(
+            eq(generationJobsTable.id, jobId),
+            eq(generationJobsTable.status, expected.status),
+            eq(generationJobsTable.stateVersion, expected.stateVersion),
+            sql`exists (
+              select 1
+              from ${projectsTable}
+              where ${projectsTable.id} = ${generationJobsTable.projectId}
+                and ${projectsTable.ownerId} = ${ownerId}
+            )`,
+          ),
+        )
+        .returning();
+      return row ? processingJobFromRow(row) : null;
     },
     () => {
-      memory.updateJob(jobId, updated);
+      const current = memory.getJob(jobId);
+      if (
+        !current ||
+        !memory.getProject(current.projectId, ownerId)
+      ) {
+        return null;
+      }
+      return memory.transitionJobFromSnapshot(jobId, expected, patch);
     },
   );
-
-  await updateOwnedScene(ownerId, job.sceneId, {
-    status: status === "done" ? "approved" : "generating",
-    outputVideoUri: status === "done" ? `mock://renders/${job.projectId}/${job.sceneId}.mp4` : null,
-    endFrameUri: status === "done" ? `mock://frames/${job.projectId}/${job.sceneId}-last.jpg` : null,
-    qualityScore: status === "done" ? 94 : null,
-  });
-  return updated;
 }
 
 function projectFromRow(row: typeof projectsTable.$inferSelect): Project {
@@ -644,7 +843,9 @@ function sceneFromRow(row: typeof scenesTable.$inferSelect): Scene {
   };
 }
 
-function jobFromRow(row: typeof generationJobsTable.$inferSelect): GenerationJob {
+function processingJobFromRow(
+  row: typeof generationJobsTable.$inferSelect,
+): GenerationJobProcessingState {
   return {
     id: row.id,
     projectId: row.projectId,
@@ -657,8 +858,32 @@ function jobFromRow(row: typeof generationJobsTable.$inferSelect): GenerationJob
     attempt: row.attempt,
     estimatedCostUsd: row.estimatedCostUsd,
     errorCode: row.errorCode,
+    extractionClaimToken: row.extractionClaimToken,
+    extractionClaimKind: row.extractionClaimKind as GenerationJobProcessingState["extractionClaimKind"],
+    extractionClaimExpiresAt: row.extractionClaimExpiresAt,
+    extractionFailureCode:
+      row.extractionFailureCode as GenerationJobProcessingState["extractionFailureCode"],
+    stateVersion: row.stateVersion,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+  };
+}
+
+function generationJobFromProcessingState(job: GenerationJobProcessingState): GenerationJob {
+  return {
+    id: job.id,
+    projectId: job.projectId,
+    sceneId: job.sceneId,
+    provider: job.provider,
+    providerOperationId: job.providerOperationId,
+    model: job.model,
+    status: job.status,
+    progress: job.progress,
+    attempt: job.attempt,
+    estimatedCostUsd: job.estimatedCostUsd,
+    errorCode: job.errorCode?.startsWith("extraction_claim:") ? null : job.errorCode,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
   };
 }
 

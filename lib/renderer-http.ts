@@ -1,4 +1,8 @@
 export type RendererResponse = {
+  state?: "processing" | "completed" | "failed";
+  disposition?: "created" | "replayed" | "taken_over" | "reconciled";
+  operationId?: string;
+  retryAfterMs?: number;
   outputUri?: string;
   output?: {
     contentType?: string;
@@ -65,6 +69,7 @@ export async function callRendererHttp(
   }
 
   const body = (await response.json().catch(() => ({}))) as RendererResponse;
+  if (response.status === 422 && body.state === "failed") return body;
   if (!response.ok) {
     throw new RendererRequestError(
       body.error?.message ?? `Renderer request failed (${response.status}).`,
@@ -75,6 +80,7 @@ export async function callRendererHttp(
       },
     );
   }
+  if (body.state === "processing") return body;
   if (body.outputUri !== options.expectedOutputUri) {
     throw new RendererRequestError("Renderer returned an unexpected output URI.", {
       status: response.status,

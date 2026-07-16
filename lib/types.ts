@@ -15,6 +15,7 @@ export type SceneStatus =
   | "generating"
   | "quality_check"
   | "approved"
+  | "rejected"
   | "failed";
 export type JobStatus = "queued" | "running" | "done" | "failed" | "canceled";
 
@@ -77,6 +78,18 @@ export type GenerationJob = {
   errorCode: string | null;
   createdAt: string;
   updatedAt: string;
+};
+
+export type ExtractionClaimKind = "completion" | "failure";
+
+export type ExtractionFailureCode = "end_frame_extraction_failed";
+
+export type GenerationJobProcessingState = GenerationJob & {
+  extractionClaimToken: string | null;
+  extractionClaimKind: ExtractionClaimKind | null;
+  extractionClaimExpiresAt: string | null;
+  extractionFailureCode: ExtractionFailureCode | null;
+  stateVersion: number;
 };
 
 export type AssetKind = "product" | "character" | "environment" | "keyframe" | "audio";

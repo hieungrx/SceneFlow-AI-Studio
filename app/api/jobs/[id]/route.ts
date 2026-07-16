@@ -1,13 +1,21 @@
 import { NextResponse } from "next/server";
 import { getChatGPTUser } from "../../../chatgpt-auth";
 import {
-  advanceOwnedMockJob,
   getOwnedJob,
-  updateOwnedJob,
-  updateOwnedScene,
+  getOwnedJobProcessingState,
+  getOwnedScene,
+  transitionOwnedJobFromSnapshot,
+  transitionOwnedSceneFromStatus,
+  transitionOwnedSceneFromStatusForJobClaim,
 } from "../../../../lib/repository";
 import { createVideoProvider } from "../../../../lib/veo-provider";
-import { extractLastFrame } from "../../../../lib/renderer-client";
+import { extractLastFrame, findExistingLastFrame } from "../../../../lib/renderer-client";
+import {
+  mockEndFrameUri,
+  mockProviderPoll,
+  pollGenerationJob,
+  toPublicGenerationJob,
+} from "../../../../lib/job-polling";
 
 type Context = { params: Promise<{ id: string }> };
 
@@ -17,38 +25,68 @@ export async function GET(_request: Request, { params }: Context) {
   const { id } = await params;
   const current = await getOwnedJob(user.email, id);
   if (!current) return NextResponse.json({ error: "job_not_found" }, { status: 404 });
-
-  if (current.provider === "mock") {
-    return NextResponse.json({ job: await advanceOwnedMockJob(user.email, id) });
-  }
-  if (!current.providerOperationId || ["done", "failed", "canceled"].includes(current.status)) {
-    return NextResponse.json({ job: current });
-  }
+  const scene = await getOwnedScene(user.email, current.sceneId);
+  if (!scene) return NextResponse.json({ error: "scene_not_found" }, { status: 404 });
 
   try {
-    const operation = await createVideoProvider().poll(current.providerOperationId);
-    let endFrameUri: string | null = null;
-    if (operation.status === "done" && operation.outputVideoUri) {
-      endFrameUri = await extractLastFrame(
-        operation.outputVideoUri,
-        current.projectId,
-        current.sceneId,
-        current.id,
+    const result = await pollGenerationJob(id, {
+      getJob: (jobId) => getOwnedJobProcessingState(user.email, jobId),
+      getScene: (sceneId) => getOwnedScene(user.email, sceneId),
+      transitionJob: (jobId, expected, patch) =>
+        transitionOwnedJobFromSnapshot(user.email, jobId, expected, patch),
+      transitionScene: (sceneId, expectedStatus, patch) =>
+        transitionOwnedSceneFromStatus(user.email, sceneId, expectedStatus, patch),
+      transitionSceneForClaim: (
+        sceneId,
+        expectedStatus,
+        jobId,
+        expectedClaimToken,
+        expectedClaimKind,
+        patch,
+      ) => transitionOwnedSceneFromStatusForJobClaim(
+        user.email,
+        sceneId,
+        expectedStatus,
+        jobId,
+        expectedClaimToken,
+        expectedClaimKind,
+        patch,
+      ),
+      pollProvider: (job) => job.provider === "mock"
+        ? Promise.resolve(mockProviderPoll(job))
+        : createVideoProvider().poll(job.providerOperationId as string),
+      findExistingEndFrame: (job, outputVideoUri) => job.provider === "mock"
+        ? Promise.resolve({ status: "missing" as const })
+        : findExistingLastFrame(
+            outputVideoUri,
+            job.projectId,
+            job.sceneId,
+            job.id,
+          ),
+      extractEndFrame: (job, outputVideoUri) => job.provider === "mock"
+        ? Promise.resolve({ status: "completed" as const, endFrameUri: mockEndFrameUri(job) })
+        : extractLastFrame(
+            outputVideoUri,
+            job.projectId,
+            job.sceneId,
+            job.id,
+          ),
+    });
+    if (!result) return NextResponse.json({ error: "job_not_found" }, { status: 404 });
+    const publicJob = toPublicGenerationJob(result.job);
+    if (
+      ["done", "failed", "canceled"].includes(result.job.status) &&
+      ["queued", "generating"].includes(result.scene.status)
+    ) {
+      return NextResponse.json(
+        { error: "job_scene_reconciliation_pending", job: publicJob },
+        { status: 409 },
       );
     }
-    const continuityReady = operation.status === "done" && Boolean(endFrameUri);
-    const job = await updateOwnedJob(user.email, id, {
-      status: operation.status,
-      progress: operation.progress,
-      errorCode: operation.errorCode,
+    return NextResponse.json({
+      job: publicJob,
+      continuityReady: Boolean(result.scene.outputVideoUri && result.scene.endFrameUri),
     });
-    await updateOwnedScene(user.email, current.sceneId, {
-      status: operation.status === "done" ? (continuityReady ? "approved" : "quality_check") : operation.status === "failed" ? "failed" : "generating",
-      outputVideoUri: operation.outputVideoUri,
-      endFrameUri,
-      qualityScore: continuityReady ? 90 : null,
-    });
-    return NextResponse.json({ job, continuityReady });
   } catch (error) {
     return NextResponse.json(
       { error: "provider_poll_failed", message: error instanceof Error ? error.message : "Veo polling failed" },

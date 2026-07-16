@@ -41,7 +41,85 @@ docker run --rm -p 8080:8080 \
 
 Để thử đọc hoặc ghi `gs://` ngoài Cloud Run, có thể truyền access token ngắn hạn qua `GOOGLE_OAUTH_ACCESS_TOKEN`. Biến này chỉ dành cho phát triển; production dùng service account metadata.
 
-## API: lấy frame cuối
+## API v2: lấy frame cuối idempotent
+
+Contract v2 dùng một operation ID ổn định theo generation job, chỉ hỗ trợ JPEG và bắt buộc
+`outputGcsUri`. Renderer tạo durable operation record bằng GCS generation precondition trước khi
+chạy FFmpeg, nên nhiều request đồng thời hoặc request retry không tạo nhiều extraction compute cho
+cùng một operation.
+
+```json
+{
+  "requestVersion": 1,
+  "operationId": "extract-last-frame:v1:job_123",
+  "projectId": "prj_123",
+  "sceneId": "scene_123",
+  "generationJobId": "job_123",
+  "videoUri": "gs://my-veo-output/project-1/scene-01.mp4",
+  "format": "jpeg",
+  "expectedContentType": "image/jpeg",
+  "outputGcsUri": "gs://my-render-output/projects/prj_123/frames/scene_123-job_123-last.jpg"
+}
+```
+
+Các binding bắt buộc:
+
+- `requestVersion` phải là `1`.
+- `operationId` phải đúng `extract-last-frame:v1:<generationJobId>`.
+- `outputGcsUri` phải kết thúc bằng
+  `projects/<projectId>/frames/<sceneId>-<generationJobId>-last.jpg`.
+- `format` nếu có phải là `jpeg`; `expectedContentType` phải là `image/jpeg`.
+- Cùng `operationId` với binding khác trả `409 idempotency_conflict`.
+
+Operation record được lưu cùng bucket output tại:
+
+```text
+<output-prefix>/.veo3flow/operations/extract-last-frame/<generationJobId>.json
+```
+
+Nếu output nằm trực tiếp dưới `projects/`, `<output-prefix>` rỗng. Record có state
+`processing`, `completed` hoặc `failed`; mọi create/update/takeover đều dùng
+`ifGenerationMatch`. Lease của renderer dài hơn hard execution deadline 5 phút, vì vậy một owner
+mới không thể takeover trong khi owner cũ vẫn còn quyền chạy compute/upload. Trước upload,
+renderer đọc lại record và xác minh fencing token.
+
+Phản hồi v2:
+
+| Trường hợp | HTTP | Kết quả |
+| --- | ---: | --- |
+| Operation mới hoàn tất | `201` | `state: completed`, `disposition: created` |
+| Operation đang chạy | `202` | `state: processing`, có `retryAfterMs` |
+| Output đã tồn tại hợp lệ | `200` | `state: completed`, `disposition: replayed` hoặc `reconciled` |
+| Durable extraction failure | `422` | `state: failed`; retry trả lại cùng failure, không chạy FFmpeg |
+| Cùng ID, khác binding | `409` | `idempotency_conflict` |
+| Outcome tạm thời chưa authoritative | `503` | retry đúng cùng operation ID |
+
+JPEG được upload bằng một GCS multipart request với `ifGenerationMatch=0`, nên media và custom
+metadata xuất hiện atomically. Metadata bắt buộc gồm:
+
+```text
+veo3flow-project-id
+veo3flow-scene-id
+veo3flow-job-id
+veo3flow-operation-id
+veo3flow-artifact-kind = continuity-last-frame
+veo3flow-request-version = 1
+veo3flow-input-uri-sha256
+```
+
+Khi replay/reconcile, renderer xác minh bucket/object, size, content type, generation, toàn bộ
+binding metadata và JPEG SOI/EOI markers trên đúng object generation trước khi trả success.
+
+Hard deadline `EXTRACTION_HARD_TIMEOUT_MS` bao phủ download, probe, FFmpeg, output probe và
+upload cho cả contract v2 lẫn nhánh legacy trong giai đoạn rollout. Cleanup local được giới hạn
+thêm 5 giây bên trong safety margin. Khi deadline hết, renderer hủy HTTP I/O, kill
+FFmpeg/ffprobe process group, chờ child đóng và không bắt đầu upload mới. Nếu client mất kết nối
+trong khi renderer còn xử lý, retry cùng
+operation ID chỉ nhận state hiện tại thay vì khởi động FFmpeg lần hai.
+
+## API legacy: lấy frame cuối
+
+Request không chứa field v2 tiếp tục dùng contract cũ để giữ backward compatibility:
 
 ```json
 {
@@ -139,11 +217,15 @@ Phản hồi thành công chỉ chứa metadata; signed URL không bị phản c
 | `MAX_TOTAL_INPUT_BYTES` | `4294967296` | Tổng nguồn mỗi job (4 GiB) |
 | `FFMPEG_TIMEOUT_MS` | `900000` | Timeout cho mỗi lệnh FFmpeg/ffprobe |
 | `DOWNLOAD_TIMEOUT_MS` | `120000` | Timeout tải xuống/tải lên |
+| `EXTRACTION_HARD_TIMEOUT_MS` | `1200000` | Hard deadline extraction v2 và legacy; từ `60000` đến tối đa `3300000` ms |
 | `GOOGLE_OAUTH_ACCESS_TOKEN` | trống | Chỉ dùng để thử đọc/ghi `gs://` local |
 
 ## Triển khai Cloud Run
 
-Tạo secret và service account riêng, sau đó cấp quyền đọc bucket chứa output của Veo và quyền tạo object trong bucket kết quả:
+Tạo secret và service account riêng, sau đó cấp quyền đọc bucket chứa output của Veo. Contract v2
+còn cần quyền đọc, tạo và cập nhật object trong bucket kết quả vì operation record là mutable bằng
+generation CAS. Việc cấp quyền IAM là thao tác vận hành riêng; source code này không tự cấp hoặc
+thay đổi IAM.
 
 ```bash
 gcloud iam service-accounts create sceneflow-renderer
@@ -152,7 +234,7 @@ gcloud storage buckets add-iam-policy-binding gs://MY_VEO_BUCKET \
   --role="roles/storage.objectViewer"
 gcloud storage buckets add-iam-policy-binding gs://MY_RENDER_OUTPUT_BUCKET \
   --member="serviceAccount:sceneflow-renderer@PROJECT_ID.iam.gserviceaccount.com" \
-  --role="roles/storage.objectCreator"
+  --role="roles/storage.objectUser"
 gcloud secrets create renderer-auth-token --data-file=-
 gcloud builds submit --tag REGION-docker.pkg.dev/PROJECT_ID/sceneflow/renderer ./services/renderer
 gcloud run deploy sceneflow-renderer \

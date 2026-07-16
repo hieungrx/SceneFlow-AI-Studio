@@ -148,7 +148,7 @@ export default function StudioDashboard({ userName, signedIn }: StudioDashboardP
       return;
     }
     const target = scenes.find((scene, index) => {
-      if (["approved", "queued", "generating"].includes(scene.status)) return false;
+      if (["approved", "queued", "generating", "quality_check"].includes(scene.status)) return false;
       return index === 0 || scenes[index - 1]?.status === "approved";
     });
     if (!target) {
@@ -187,20 +187,18 @@ export default function StudioDashboard({ userName, signedIn }: StudioDashboardP
   async function pollJob(jobId: string, sceneId: string): Promise<GenerationJob | null> {
     for (let attempt = 0; attempt < 6; attempt += 1) {
       await delay(650);
-      const { job, continuityReady } = await requestJson<JobResponse>(`/api/jobs/${jobId}`);
+      const { job } = await requestJson<JobResponse>(`/api/jobs/${jobId}`);
       setJobs((current) => current.map((item) => item.id === job.id ? job : item));
       setScenes((current) => current.map((scene) => scene.id === sceneId ? {
         ...scene,
-        status: job.status === "done" ? (continuityReady === false ? "quality_check" : "approved") : "generating",
-        outputVideoUri: job.status === "done" ? `mock://renders/${scene.projectId}/${scene.id}.mp4` : scene.outputVideoUri,
-        qualityScore: job.status === "done" ? 94 : scene.qualityScore,
+        status: job.status === "done"
+          ? "quality_check"
+          : job.status === "failed" || job.status === "canceled"
+            ? "failed"
+            : "generating",
       } : scene));
       if (job.status === "done") {
-        if (continuityReady === false) {
-          setNotice("Video đã tạo xong nhưng chưa tách được frame cuối; pipeline dừng để tránh mất continuity.");
-          return null;
-        }
-        setNotice("Cảnh đã qua QC và frame cuối đã được khóa cho cảnh tiếp theo.");
+        setNotice("Video và frame cuối đã sẵn sàng. Cảnh đang chờ bạn duyệt QC.");
         return job;
       }
       if (job.status === "failed" || job.status === "canceled") return job;
@@ -212,15 +210,20 @@ export default function StudioDashboard({ userName, signedIn }: StudioDashboardP
     setBusy(true);
     try {
       if (!signedIn || scenes.every((scene) => scene.id.startsWith("scene_demo"))) {
-        for (const scene of scenes) {
-          if (scene.status === "approved") continue;
-          setNotice(`Đang mô phỏng cảnh ${scene.sceneIndex}/${scenes.length} theo đúng thứ tự continuity.`);
-          setScenes((current) => current.map((item) => item.id === scene.id ? { ...item, status: "generating" } : item));
-          await delay(520);
-          setScenes((current) => current.map((item) => item.id === scene.id ? { ...item, status: "approved", qualityScore: 94, endFrameUri: `mock://frame-${item.sceneIndex}.jpg`, outputVideoUri: `mock://${item.id}.mp4` } : item));
+        const target = scenes.find((scene, index) => {
+          if (["approved", "queued", "generating", "quality_check"].includes(scene.status)) return false;
+          return index === 0 || scenes[index - 1]?.status === "approved";
+        });
+        if (!target) {
+          setNotice("Pipeline đang chờ quyết định QC trước khi tạo cảnh tiếp theo.");
+          return;
         }
-        setJobs((current) => current.map((job) => ({ ...job, status: "done", progress: 100 })));
-        setNotice("Pipeline hoàn tất: 4 cảnh đã duyệt, continuity 94/100 và sẵn sàng ghép.");
+        setNotice(`Đang mô phỏng cảnh ${target.sceneIndex}/${scenes.length} theo đúng thứ tự continuity.`);
+        setScenes((current) => current.map((item) => item.id === target.id ? { ...item, status: "generating" } : item));
+        await delay(520);
+        setScenes((current) => current.map((item) => item.id === target.id ? { ...item, status: "quality_check", qualityScore: 94, endFrameUri: `mock://frame-${item.sceneIndex}.jpg`, outputVideoUri: `mock://${item.id}.mp4` } : item));
+        setJobs((current) => current.map((job) => job.sceneId === target.id ? { ...job, status: "done", progress: 100 } : job));
+        setNotice("Cảnh mô phỏng đã tạo xong và đang chờ bạn duyệt QC.");
         return;
       }
 
@@ -232,8 +235,9 @@ export default function StudioDashboard({ userName, signedIn }: StudioDashboardP
         setScenes((current) => current.map((item) => item.id === scene.id ? { ...item, status: "queued" } : item));
         const finished = await pollJob(job.id, scene.id);
         if (!finished || finished.status !== "done") throw new Error(`Cảnh ${scene.sceneIndex} chưa hoàn tất; pipeline đã tạm dừng an toàn.`);
+        setNotice(`Cảnh ${scene.sceneIndex} đang chờ duyệt QC; pipeline đã dừng trước cảnh kế tiếp.`);
+        return;
       }
-      setNotice("Toàn bộ cảnh đã qua QC. Bạn có thể ghép video dài ngay bây giờ.");
     } catch (error) {
       setNotice(readableError(error));
     } finally {
@@ -254,9 +258,9 @@ export default function StudioDashboard({ userName, signedIn }: StudioDashboardP
     setJobs((current) => [job, ...current.filter((item) => item.sceneId !== sceneId)]);
     setNotice("Đang mô phỏng một job Veo Lower Priority.");
     window.setTimeout(() => {
-      setScenes((current) => current.map((scene) => scene.id === sceneId ? { ...scene, status: "approved", qualityScore: 94, outputVideoUri: `mock://${scene.id}.mp4` } : scene));
+      setScenes((current) => current.map((scene) => scene.id === sceneId ? { ...scene, status: "quality_check", qualityScore: 94, endFrameUri: `mock://frame-${scene.sceneIndex}.jpg`, outputVideoUri: `mock://${scene.id}.mp4` } : scene));
       setJobs((current) => current.map((item) => item.id === job.id ? { ...item, status: "done", progress: 100 } : item));
-      setNotice("Mô phỏng hoàn tất: cảnh đạt QC 94/100 và đã mở khóa cảnh kế tiếp.");
+      setNotice("Mô phỏng hoàn tất: cảnh đang chờ bạn duyệt QC.");
     }, 900);
   }
 
@@ -400,7 +404,7 @@ export default function StudioDashboard({ userName, signedIn }: StudioDashboardP
                     <div className="scene-title-row"><h3>{scene.title}</h3><StatusPill status={scene.status} /></div>
                     <p>{scene.action}</p>
                     <div className="boundary-note"><strong>Kết cảnh:</strong> {scene.endState}</div>
-                    <div className="scene-actions"><button type="button" onClick={() => setNotice(scene.prompt)}>Xem prompt</button><button type="button" disabled={busy} onClick={() => generateScene(scene.id)}>Tạo lại</button></div>
+                    <div className="scene-actions"><button type="button" onClick={() => setNotice(scene.prompt)}>Xem prompt</button><button type="button" disabled={busy || scene.status === "quality_check"} onClick={() => generateScene(scene.id)}>Tạo lại</button></div>
                   </div>
                 </article>
                 {index < scenes.length - 1 ? <span className="scene-connector" aria-label="Frame nối">→</span> : null}
@@ -451,12 +455,12 @@ function WorkflowStep({ index, title, caption, status }: { index: string; title:
 }
 
 function StatusPill({ status }: { status: Scene["status"] }) {
-  const css = status === "approved" ? "completed" : status === "generating" ? "processing" : status === "waiting_previous" || status === "planned" ? "draft" : status;
+  const css = status === "approved" ? "completed" : status === "generating" ? "processing" : status === "waiting_previous" || status === "planned" ? "draft" : status === "rejected" ? "failed" : status;
   return <span className={`status-pill status-${css}`}>{sceneStatusLabel(status)}</span>;
 }
 
 function sceneStatusLabel(status: Scene["status"]): string {
-  return ({ approved: "Đã duyệt", generating: "Đang tạo", queued: "Đã xếp hàng", waiting_previous: "Chờ cảnh trước", planned: "Đã lên kế hoạch", quality_check: "Đang QC", failed: "Lỗi" } as Record<Scene["status"], string>)[status];
+  return ({ approved: "Đã duyệt", rejected: "Đã từ chối", generating: "Đang tạo", queued: "Đã xếp hàng", waiting_previous: "Chờ cảnh trước", planned: "Đã lên kế hoạch", quality_check: "Đang QC", failed: "Lỗi" } as Record<Scene["status"], string>)[status];
 }
 
 function statusLabel(status: GenerationJob["status"]): string {

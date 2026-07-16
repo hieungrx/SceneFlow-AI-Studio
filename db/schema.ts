@@ -1,4 +1,13 @@
-import { index, integer, real, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { sql } from "drizzle-orm";
+import {
+  check,
+  index,
+  integer,
+  real,
+  sqliteTable,
+  text,
+  uniqueIndex,
+} from "drizzle-orm/sqlite-core";
 
 export const users = sqliteTable(
   "users",
@@ -102,12 +111,30 @@ export const generationJobs = sqliteTable(
     idempotencyKey: text("idempotency_key").notNull(),
     estimatedCostUsd: real("estimated_cost_usd").notNull(),
     errorCode: text("error_code"),
+    extractionClaimToken: text("extraction_claim_token"),
+    extractionClaimKind: text("extraction_claim_kind"),
+    extractionClaimExpiresAt: text("extraction_claim_expires_at"),
+    extractionFailureCode: text("extraction_failure_code"),
+    stateVersion: integer("state_version").notNull().default(0),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
   },
   (table) => [
     uniqueIndex("generation_jobs_idempotency_idx").on(table.idempotencyKey),
     index("generation_jobs_project_status_idx").on(table.projectId, table.status),
+    check(
+      "generation_jobs_extraction_claim_token_check",
+      sql`${table.extractionClaimToken} is null or length(${table.extractionClaimToken}) between 1 and 128`,
+    ),
+    check(
+      "generation_jobs_extraction_claim_kind_check",
+      sql`${table.extractionClaimKind} is null or ${table.extractionClaimKind} in ('completion', 'failure')`,
+    ),
+    check(
+      "generation_jobs_extraction_failure_code_check",
+      sql`${table.extractionFailureCode} is null or ${table.extractionFailureCode} = 'end_frame_extraction_failed'`,
+    ),
+    check("generation_jobs_state_version_check", sql`${table.stateVersion} >= 0`),
   ],
 );
 
