@@ -22,10 +22,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS scenes_project_index_idx ON scenes(project_id,
 CREATE TABLE IF NOT EXISTS generation_jobs (id TEXT PRIMARY KEY NOT NULL, project_id TEXT NOT NULL, scene_id TEXT NOT NULL, provider TEXT NOT NULL, provider_operation_id TEXT, model TEXT NOT NULL, status TEXT NOT NULL, progress INTEGER NOT NULL, attempt INTEGER NOT NULL, idempotency_key TEXT NOT NULL, estimated_cost_usd REAL NOT NULL, error_code TEXT, extraction_claim_token TEXT CHECK (extraction_claim_token IS NULL OR length(extraction_claim_token) BETWEEN 1 AND 128), extraction_claim_kind TEXT CHECK (extraction_claim_kind IS NULL OR extraction_claim_kind IN ('completion', 'failure')), extraction_claim_expires_at TEXT, extraction_failure_code TEXT CHECK (extraction_failure_code IS NULL OR extraction_failure_code = 'end_frame_extraction_failed'), state_version INTEGER NOT NULL DEFAULT 0 CHECK (state_version >= 0), created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE UNIQUE INDEX IF NOT EXISTS generation_jobs_idempotency_idx ON generation_jobs(idempotency_key);
 CREATE INDEX IF NOT EXISTS generation_jobs_project_status_idx ON generation_jobs(project_id, status);
+CREATE UNIQUE INDEX IF NOT EXISTS generation_jobs_one_active_per_project_idx ON generation_jobs(project_id) WHERE status IN ('queued', 'running');
 CREATE TABLE IF NOT EXISTS prompt_versions (id TEXT PRIMARY KEY NOT NULL, project_id TEXT NOT NULL, scene_id TEXT, version INTEGER NOT NULL, raw_prompt TEXT NOT NULL, optimized_prompt TEXT NOT NULL, assumptions_json TEXT NOT NULL, accepted INTEGER NOT NULL, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS prompt_versions_scene_idx ON prompt_versions(scene_id, version);
 CREATE TABLE IF NOT EXISTS final_renders (id TEXT PRIMARY KEY NOT NULL, project_id TEXT NOT NULL, status TEXT NOT NULL, manifest_json TEXT NOT NULL, output_video_key TEXT, duration_seconds REAL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS final_renders_project_idx ON final_renders(project_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS final_renders_one_active_per_project_idx ON final_renders(project_id) WHERE status IN ('queued', 'running');
 CREATE TABLE IF NOT EXISTS credit_ledger (id TEXT PRIMARY KEY NOT NULL, owner_id TEXT NOT NULL, project_id TEXT, job_id TEXT, kind TEXT NOT NULL, amount_credits REAL NOT NULL, balance_after REAL NOT NULL, note TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS credit_ledger_owner_created_idx ON credit_ledger(owner_id, created_at);
 `;

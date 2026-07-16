@@ -297,6 +297,141 @@ test("manual QC API runtime behavior", async (t) => {
     const scene = await readScene(fixture.ownerId, fixture.project.id, fixture.scene.id);
     assert.equal(scene.status, "quality_check");
   });
+
+  await t.test("concurrent generation requests share one job and one credit debit", async () => {
+    const fixture = await createStoryboard("generation-admission@example.com");
+    const target = fixture.scenes[0];
+
+    const responses = await Promise.all([
+      api(`/api/scenes/${target.id}/generate`, { method: "POST", ownerId: fixture.ownerId }),
+      api(`/api/scenes/${target.id}/generate`, { method: "POST", ownerId: fixture.ownerId }),
+    ]);
+
+    for (const response of responses) assert.equal(response.status, 202);
+    assert.equal(responses[0].body.job.id, responses[1].body.job.id);
+    assert.equal(responses[0].body.job.attempt, 1);
+    assert.equal(responses[1].body.job.attempt, 1);
+    assert.equal(responses.filter((response) => response.body.credits?.charged === 4).length, 1);
+  });
+
+  await t.test("quality_check cannot be generated again before a QC decision", async () => {
+    const fixture = await createQualityCheckScene("generation-qc-gate@example.com");
+
+    const response = await api(`/api/scenes/${fixture.scene.id}/generate`, {
+      method: "POST",
+      ownerId: fixture.ownerId,
+    });
+
+    assert.equal(response.status, 409);
+    assert.equal(response.body.error, "scene_requires_qc_decision");
+    const scene = await readScene(fixture.ownerId, fixture.project.id, fixture.scene.id);
+    assert.equal(scene.status, "quality_check");
+  });
+
+  await t.test("an active generation job blocks every other scene in the project", async () => {
+    const fixture = await createStoryboard("generation-project-guard@example.com");
+    const first = fixture.scenes[0];
+    const second = fixture.scenes[1];
+    executeLocalSql(
+      `UPDATE scenes SET status = 'planned', depends_on_scene_id = NULL WHERE id = '${sqlText(second.id)}';`,
+    );
+    const admitted = await api(`/api/scenes/${first.id}/generate`, {
+      method: "POST",
+      ownerId: fixture.ownerId,
+    });
+    assert.equal(admitted.status, 202);
+
+    const blocked = await api(`/api/scenes/${second.id}/generate`, {
+      method: "POST",
+      ownerId: fixture.ownerId,
+    });
+    assert.equal(blocked.status, 409);
+    assert.equal(blocked.body.error, "project_generation_in_progress");
+  });
+
+  await t.test("regeneration increments attempt and invalidates downstream only after submit", async () => {
+    const fixture = await createStoryboard("generation-regenerate@example.com");
+    const first = await generateFixtureSceneToQualityCheck(fixture, fixture.scenes[0]);
+    const firstApproval = await qc(first.scene.id, fixture.ownerId, { decision: "approve" });
+    assert.equal(firstApproval.status, 200);
+    const second = await generateFixtureSceneToQualityCheck(fixture, fixture.scenes[1]);
+    const secondApproval = await qc(second.scene.id, fixture.ownerId, { decision: "approve" });
+    assert.equal(secondApproval.status, 200);
+    const third = await generateFixtureSceneToQualityCheck(fixture, fixture.scenes[2]);
+    assert.equal(third.scene.status, "quality_check");
+
+    const regenerated = await api(`/api/scenes/${first.scene.id}/generate`, {
+      method: "POST",
+      ownerId: fixture.ownerId,
+    });
+    assert.equal(regenerated.status, 202);
+    assert.equal(regenerated.body.job.attempt, 2);
+
+    const project = await api(`/api/projects/${fixture.project.id}`, { ownerId: fixture.ownerId });
+    assert.equal(project.status, 200);
+    const scenes = project.body.scenes;
+    assert.equal(scenes[0].status, "queued");
+    assert.equal(scenes[0].outputVideoUri, null);
+    assert.equal(scenes[0].endFrameUri, null);
+    for (const downstream of scenes.slice(1)) {
+      assert.equal(downstream.status, "waiting_previous");
+      assert.equal(downstream.startFrameUri, null);
+      assert.equal(downstream.outputVideoUri, null);
+      assert.equal(downstream.endFrameUri, null);
+    }
+  });
+
+  await t.test("generation and final render guards are symmetric", async () => {
+    const generationFixture = await createStoryboard("render-generation-guard@example.com");
+    const generated = await api(`/api/scenes/${generationFixture.scenes[0].id}/generate`, {
+      method: "POST",
+      ownerId: generationFixture.ownerId,
+    });
+    assert.equal(generated.status, 202);
+    const blockedRender = await api(`/api/projects/${generationFixture.project.id}/render`, {
+      method: "POST",
+      ownerId: generationFixture.ownerId,
+    });
+    assert.equal(blockedRender.status, 409);
+    assert.equal(blockedRender.body.error, "generation_in_progress");
+
+    const renderFixture = await createStoryboard("generation-render-guard@example.com");
+    const renderId = `render_${crypto.randomUUID()}`;
+    const now = new Date().toISOString();
+    executeLocalSql(
+      `INSERT INTO final_renders (id, project_id, status, manifest_json, output_video_key, duration_seconds, created_at, updated_at) VALUES ('${sqlText(renderId)}', '${sqlText(renderFixture.project.id)}', 'queued', '{}', NULL, NULL, '${sqlText(now)}', '${sqlText(now)}');`,
+    );
+    const blockedGeneration = await api(`/api/scenes/${renderFixture.scenes[0].id}/generate`, {
+      method: "POST",
+      ownerId: renderFixture.ownerId,
+    });
+    assert.equal(blockedGeneration.status, 409);
+    assert.equal(blockedGeneration.body.error, "project_render_in_progress");
+  });
+
+  await t.test("concurrent final-render requests share one reservation", async () => {
+    const fixture = await createStoryboard("render-admission@example.com");
+    for (const scene of fixture.scenes) {
+      const completed = await generateFixtureSceneToQualityCheck(fixture, scene);
+      const approved = await qc(completed.scene.id, fixture.ownerId, { decision: "approve" });
+      assert.equal(approved.status, 200);
+    }
+
+    const responses = await Promise.all([
+      api(`/api/projects/${fixture.project.id}/render`, {
+        method: "POST",
+        ownerId: fixture.ownerId,
+      }),
+      api(`/api/projects/${fixture.project.id}/render`, {
+        method: "POST",
+        ownerId: fixture.ownerId,
+      }),
+    ]);
+
+    for (const response of responses) assert.equal(response.status, 202);
+    assert.equal(responses[0].body.render.id, responses[1].body.render.id);
+    assert.equal(responses.filter((response) => response.body.reused === true).length, 1);
+  });
 });
 
 async function createQualityCheckScene(ownerId) {
@@ -342,6 +477,24 @@ async function createMockCompletionBoundary(ownerId) {
   const activeScene = await readScene(ownerId, fixture.project.id, scene.id);
   assert.equal(activeScene.status, "generating");
   return { ...fixture, scene: activeScene, job };
+}
+
+async function generateFixtureSceneToQualityCheck(fixture, scene) {
+  const generated = await api(`/api/scenes/${scene.id}/generate`, {
+    method: "POST",
+    ownerId: fixture.ownerId,
+  });
+  assert.equal(generated.status, 202);
+  let job = generated.body.job;
+  for (let poll = 0; poll < 4 && job.status !== "done"; poll += 1) {
+    const response = await api(`/api/jobs/${job.id}`, { ownerId: fixture.ownerId });
+    assert.equal(response.status, 200);
+    job = response.body.job;
+  }
+  assert.equal(job.status, "done");
+  const updatedScene = await readScene(fixture.ownerId, fixture.project.id, scene.id);
+  assert.equal(updatedScene.status, "quality_check");
+  return { scene: updatedScene, job };
 }
 
 async function createStoryboard(ownerId = owner) {

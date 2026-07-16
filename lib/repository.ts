@@ -12,6 +12,12 @@ import {
 } from "../db/schema";
 import * as memory from "./mock-store";
 import type {
+  GenerationActivationInput,
+  GenerationFailureInput,
+  GenerationReservationInput,
+  GenerationReservationResult,
+} from "./generation-start";
+import type {
   AssetRecord,
   ExtractionClaimKind,
   FinalRender,
@@ -84,7 +90,7 @@ export async function ensureUser(ownerId: string, displayName: string): Promise<
         });
       }
     },
-    () => undefined,
+    () => memory.ensureUser(ownerId),
   );
 }
 
@@ -494,6 +500,347 @@ export async function createOwnedJob(
   );
 }
 
+export async function reserveOwnedGeneration(
+  ownerId: string,
+  input: GenerationReservationInput,
+): Promise<GenerationReservationResult> {
+  return withMemoryFallback(
+    async (db) => {
+      const client = db.$client;
+      const insertJob = client.prepare(`
+        INSERT OR IGNORE INTO generation_jobs (
+          id, project_id, scene_id, provider, provider_operation_id, model,
+          status, progress, attempt, idempotency_key, estimated_cost_usd,
+          error_code, extraction_claim_token, extraction_claim_kind,
+          extraction_claim_expires_at, extraction_failure_code, state_version,
+          created_at, updated_at
+        )
+        SELECT
+          ?, s.project_id, s.id, ?, NULL, p.model,
+          'queued', 0,
+          COALESCE((SELECT MAX(previous.attempt) FROM generation_jobs previous WHERE previous.scene_id = s.id), 0) + 1,
+          s.id || ':' || CAST(COALESCE((SELECT MAX(previous.attempt) FROM generation_jobs previous WHERE previous.scene_id = s.id), 0) + 1 AS TEXT),
+          ?, NULL, NULL, NULL, NULL, NULL, 0, ?, ?
+        FROM scenes s
+        JOIN projects p ON p.id = s.project_id
+        WHERE s.id = ?
+          AND s.project_id = ?
+          AND p.owner_id = ?
+          AND s.status IN ('planned', 'waiting_previous', 'approved', 'rejected', 'failed')
+          AND (
+            s.depends_on_scene_id IS NULL
+            OR EXISTS (
+              SELECT 1 FROM scenes previous_scene
+              WHERE previous_scene.id = s.depends_on_scene_id
+                AND previous_scene.project_id = s.project_id
+                AND previous_scene.status = 'approved'
+                AND previous_scene.end_frame_key IS NOT NULL
+            )
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM generation_jobs active_job
+            WHERE active_job.project_id = s.project_id
+              AND active_job.status IN ('queued', 'running')
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM final_renders active_render
+            WHERE active_render.project_id = s.project_id
+              AND active_render.status IN ('queued', 'running')
+          )
+          AND COALESCE((
+            SELECT balance_after FROM credit_ledger
+            WHERE owner_id = ?
+            ORDER BY created_at DESC, rowid DESC
+            LIMIT 1
+          ), 0) >= ?
+      `).bind(
+        input.jobId,
+        input.provider,
+        input.estimatedCostUsd,
+        input.createdAt,
+        input.createdAt,
+        input.sceneId,
+        input.projectId,
+        ownerId,
+        ownerId,
+        input.requiredCredits,
+      );
+      const debitCredit = client.prepare(`
+        INSERT INTO credit_ledger (
+          id, owner_id, project_id, job_id, kind, amount_credits,
+          balance_after, note, created_at
+        )
+        SELECT
+          ?, ?, s.project_id, ?, 'generation_debit', ?,
+          latest.balance_after - ?, 'Veo scene generation reservation', ?
+        FROM scenes s
+        JOIN (
+          SELECT balance_after FROM credit_ledger
+          WHERE owner_id = ?
+          ORDER BY created_at DESC, rowid DESC
+          LIMIT 1
+        ) latest
+        WHERE s.id = ?
+          AND EXISTS (SELECT 1 FROM generation_jobs WHERE id = ?)
+      `).bind(
+        `credit_job_${input.jobId}`,
+        ownerId,
+        input.jobId,
+        -input.requiredCredits,
+        input.requiredCredits,
+        input.createdAt,
+        ownerId,
+        input.sceneId,
+        input.jobId,
+      );
+      await client.batch([insertJob, debitCredit]);
+
+      const [insertedRow] = await db
+        .select()
+        .from(generationJobsTable)
+        .where(eq(generationJobsTable.id, input.jobId))
+        .limit(1);
+      if (insertedRow) {
+        const [projectRow] = await db
+          .select()
+          .from(projectsTable)
+          .where(and(eq(projectsTable.id, input.projectId), eq(projectsTable.ownerId, ownerId)))
+          .limit(1);
+        const [sceneRow] = await db
+          .select()
+          .from(scenesTable)
+          .where(eq(scenesTable.id, input.sceneId))
+          .limit(1);
+        if (!projectRow || !sceneRow) {
+          return { kind: "blocked", error: "scene_generation_inconsistent" };
+        }
+        return {
+          kind: "reserved",
+          job: processingJobFromRow(insertedRow),
+          project: projectFromRow(projectRow),
+          scene: await resolveDbSubmissionScene(db, sceneFromRow(sceneRow)),
+          balanceAfter: await getDbCreditBalance(db, ownerId),
+        };
+      }
+
+      return classifyDbGenerationReservation(db, ownerId, input);
+    },
+    () => memory.reserveGeneration(ownerId, input),
+  );
+}
+
+export async function activateOwnedGeneration(
+  ownerId: string,
+  input: GenerationActivationInput,
+): Promise<GenerationJobProcessingState | null> {
+  const updatedAt = new Date().toISOString();
+  return withMemoryFallback(
+    async (db) => {
+      const client = db.$client;
+      const nextVersion = input.expectedStateVersion + 1;
+      await client.batch([
+        client.prepare(`
+          UPDATE generation_jobs
+          SET provider_operation_id = ?, status = ?, progress = ?,
+              error_code = NULL, state_version = state_version + 1, updated_at = ?
+          WHERE id = ?
+            AND status = 'running'
+            AND state_version = ?
+            AND provider_operation_id IS NULL
+            AND EXISTS (SELECT 1 FROM credit_ledger WHERE id = ?)
+            AND EXISTS (
+              SELECT 1 FROM projects
+              WHERE projects.id = generation_jobs.project_id
+                AND projects.owner_id = ?
+            )
+            AND EXISTS (
+              SELECT 1 FROM scenes target
+              WHERE target.id = generation_jobs.scene_id
+                AND target.status = ?
+                AND target.status IN ('planned', 'waiting_previous', 'approved', 'rejected', 'failed')
+                AND (
+                  target.depends_on_scene_id IS NULL
+                  OR EXISTS (
+                    SELECT 1 FROM scenes previous_scene
+                    WHERE previous_scene.id = target.depends_on_scene_id
+                      AND previous_scene.project_id = target.project_id
+                      AND previous_scene.status = 'approved'
+                      AND previous_scene.end_frame_key IS NOT NULL
+                  )
+                )
+            )
+        `).bind(
+          input.operation.operationId,
+          input.operation.status,
+          input.operation.progress,
+          updatedAt,
+          input.jobId,
+          input.expectedStateVersion,
+          `credit_job_${input.jobId}`,
+          ownerId,
+          input.expectedSceneStatus,
+        ),
+        client.prepare(`
+          UPDATE scenes
+          SET status = 'queued',
+              start_frame_key = CASE
+                WHEN depends_on_scene_id IS NULL THEN start_frame_key
+                ELSE (SELECT end_frame_key FROM scenes previous_scene WHERE previous_scene.id = scenes.depends_on_scene_id)
+              END,
+              end_frame_key = NULL,
+              output_video_key = NULL,
+              quality_score = NULL,
+              updated_at = ?
+          WHERE id = (SELECT scene_id FROM generation_jobs WHERE id = ?)
+            AND status = ?
+            AND EXISTS (
+              SELECT 1 FROM generation_jobs activated
+              JOIN projects ON projects.id = activated.project_id
+              WHERE activated.id = ?
+                AND activated.provider_operation_id = ?
+                AND activated.state_version = ?
+                AND projects.owner_id = ?
+            )
+        `).bind(
+          updatedAt,
+          input.jobId,
+          input.expectedSceneStatus,
+          input.jobId,
+          input.operation.operationId,
+          nextVersion,
+          ownerId,
+        ),
+        client.prepare(`
+          UPDATE scenes
+          SET status = 'waiting_previous', start_frame_key = NULL,
+              end_frame_key = NULL, output_video_key = NULL,
+              quality_score = NULL, updated_at = ?
+          WHERE project_id = (SELECT project_id FROM generation_jobs WHERE id = ?)
+            AND scene_index > (
+              SELECT scene_index FROM scenes
+              WHERE id = (SELECT scene_id FROM generation_jobs WHERE id = ?)
+            )
+            AND ? IN ('approved', 'rejected', 'failed')
+            AND EXISTS (
+              SELECT 1 FROM generation_jobs activated
+              JOIN projects ON projects.id = activated.project_id
+              WHERE activated.id = ?
+                AND activated.provider_operation_id = ?
+                AND activated.state_version = ?
+                AND projects.owner_id = ?
+            )
+        `).bind(
+          updatedAt,
+          input.jobId,
+          input.jobId,
+          input.expectedSceneStatus,
+          input.jobId,
+          input.operation.operationId,
+          nextVersion,
+          ownerId,
+        ),
+      ]);
+      const [row] = await db
+        .select()
+        .from(generationJobsTable)
+        .where(
+          and(
+            eq(generationJobsTable.id, input.jobId),
+            eq(generationJobsTable.providerOperationId, input.operation.operationId),
+            eq(generationJobsTable.stateVersion, nextVersion),
+          ),
+        )
+        .limit(1);
+      return row ? processingJobFromRow(row) : null;
+    },
+    () => memory.activateGeneration(ownerId, input),
+  );
+}
+
+export async function failOwnedGenerationSubmissionAndRefund(
+  ownerId: string,
+  input: GenerationFailureInput,
+): Promise<{ job: GenerationJobProcessingState; balanceAfter: number } | null> {
+  const updatedAt = new Date().toISOString();
+  return withMemoryFallback(
+    async (db) => {
+      const client = db.$client;
+      const nextVersion = input.expectedStateVersion + 1;
+      await client.batch([
+        client.prepare(`
+          UPDATE generation_jobs
+          SET status = 'failed', progress = 0, error_code = ?,
+              state_version = state_version + 1, updated_at = ?
+          WHERE id = ?
+            AND status = 'running'
+            AND state_version = ?
+            AND provider_operation_id IS NULL
+            AND EXISTS (SELECT 1 FROM credit_ledger WHERE id = ?)
+            AND EXISTS (
+              SELECT 1 FROM projects
+              WHERE projects.id = generation_jobs.project_id
+                AND projects.owner_id = ?
+            )
+        `).bind(
+          input.errorCode,
+          updatedAt,
+          input.jobId,
+          input.expectedStateVersion,
+          `credit_job_${input.jobId}`,
+          ownerId,
+        ),
+        client.prepare(`
+          INSERT OR IGNORE INTO credit_ledger (
+            id, owner_id, project_id, job_id, kind, amount_credits,
+            balance_after, note, created_at
+          )
+          SELECT
+            ?, ?, failed.project_id, failed.id, 'generation_refund', ?,
+            latest.balance_after + ?, 'Veo submission rejected refund', ?
+          FROM generation_jobs failed
+          JOIN (
+            SELECT balance_after FROM credit_ledger
+            WHERE owner_id = ?
+            ORDER BY created_at DESC, rowid DESC
+            LIMIT 1
+          ) latest
+          WHERE failed.id = ?
+            AND failed.status = 'failed'
+            AND failed.state_version = ?
+            AND failed.error_code = ?
+            AND EXISTS (SELECT 1 FROM credit_ledger WHERE id = ?)
+        `).bind(
+          `credit_refund_${input.jobId}`,
+          ownerId,
+          input.requiredCredits,
+          input.requiredCredits,
+          updatedAt,
+          ownerId,
+          input.jobId,
+          nextVersion,
+          input.errorCode,
+          `credit_job_${input.jobId}`,
+        ),
+      ]);
+      const [row] = await db
+        .select()
+        .from(generationJobsTable)
+        .where(
+          and(
+            eq(generationJobsTable.id, input.jobId),
+            eq(generationJobsTable.status, "failed"),
+            eq(generationJobsTable.stateVersion, nextVersion),
+          ),
+        )
+        .limit(1);
+      return row
+        ? { job: processingJobFromRow(row), balanceAfter: await getDbCreditBalance(db, ownerId) }
+        : null;
+    },
+    () => memory.failGenerationSubmissionAndRefund(ownerId, input),
+  );
+}
+
 export async function findOwnedActiveJobForScene(
   ownerId: string,
   sceneId: string,
@@ -516,6 +863,33 @@ export async function findOwnedActiveJobForScene(
     },
     () => {
       const job = memory.findActiveJobForScene(sceneId);
+      return job ? generationJobFromProcessingState(job) : null;
+    },
+  );
+}
+
+export async function findOwnedActiveJobForProject(
+  ownerId: string,
+  projectId: string,
+): Promise<GenerationJob | null> {
+  if (!(await getOwnedProject(ownerId, projectId))) return null;
+  return withMemoryFallback(
+    async (db) => {
+      const [row] = await db
+        .select()
+        .from(generationJobsTable)
+        .where(
+          and(
+            eq(generationJobsTable.projectId, projectId),
+            inArray(generationJobsTable.status, ["queued", "running"]),
+          ),
+        )
+        .orderBy(desc(generationJobsTable.createdAt))
+        .limit(1);
+      return row ? generationJobFromProcessingState(processingJobFromRow(row)) : null;
+    },
+    () => {
+      const job = memory.findActiveJobForProject(projectId);
       return job ? generationJobFromProcessingState(job) : null;
     },
   );
@@ -551,7 +925,7 @@ export async function getCreditBalance(ownerId: string): Promise<number> {
         .limit(1);
       return row?.balance ?? 0;
     },
-    () => 100,
+    () => memory.getCreditBalance(ownerId),
   );
 }
 
@@ -579,7 +953,7 @@ export async function chargeCredits(input: {
       });
       return balanceAfter;
     },
-    () => balanceAfter,
+    () => memory.chargeCredits(input.ownerId, input.jobId, input.amount),
   );
 }
 
@@ -603,6 +977,127 @@ export async function createOwnedRender(
       return render;
     },
     () => memory.saveRender(render),
+  );
+}
+
+export type FinalRenderReservationResult =
+  | { kind: "reserved"; render: FinalRender }
+  | { kind: "reused"; render: FinalRender }
+  | { kind: "blocked"; error: "project_not_found" | "scenes_not_ready" | "generation_in_progress" };
+
+export async function reserveOwnedFinalRender(
+  ownerId: string,
+  render: FinalRender,
+): Promise<FinalRenderReservationResult> {
+  return withMemoryFallback(
+    async (db) => {
+      const manifestScenes = render.manifest.scenes;
+      const sceneGuards = manifestScenes.map(
+        () => `EXISTS (
+          SELECT 1 FROM scenes ready_scene
+          WHERE ready_scene.id = ?
+            AND ready_scene.project_id = ?
+            AND ready_scene.status = 'approved'
+            AND ready_scene.output_video_key = ?
+        )`,
+      );
+      const sqlText = `
+        INSERT OR IGNORE INTO final_renders (
+          id, project_id, status, manifest_json, output_video_key,
+          duration_seconds, created_at, updated_at
+        )
+        SELECT ?, ?, 'queued', ?, NULL, NULL, ?, ?
+        WHERE EXISTS (SELECT 1 FROM projects WHERE id = ? AND owner_id = ?)
+          AND NOT EXISTS (
+            SELECT 1 FROM generation_jobs
+            WHERE project_id = ? AND status IN ('queued', 'running')
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM final_renders
+            WHERE project_id = ? AND status IN ('queued', 'running')
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM final_renders
+            WHERE project_id = ? AND status = 'done' AND manifest_json = ?
+          )
+          AND (SELECT COUNT(*) FROM scenes WHERE project_id = ?) = ?
+          ${sceneGuards.length > 0 ? `AND ${sceneGuards.join(" AND ")}` : "AND 0"}
+      `;
+      const guardBindings = manifestScenes.flatMap((scene) => [
+        scene.sceneId,
+        render.projectId,
+        scene.sourceUri,
+      ]);
+      await db.$client
+        .prepare(sqlText)
+        .bind(
+          render.id,
+          render.projectId,
+          JSON.stringify(render.manifest),
+          render.createdAt,
+          render.updatedAt,
+          render.projectId,
+          ownerId,
+          render.projectId,
+          render.projectId,
+          render.projectId,
+          JSON.stringify(render.manifest),
+          render.projectId,
+          manifestScenes.length,
+          ...guardBindings,
+        )
+        .run();
+
+      const inserted = await getDbRenderById(db, render.id);
+      if (inserted) return { kind: "reserved", render: inserted };
+      const [projectRow] = await db
+        .select({ id: projectsTable.id })
+        .from(projectsTable)
+        .where(and(eq(projectsTable.id, render.projectId), eq(projectsTable.ownerId, ownerId)))
+        .limit(1);
+      if (!projectRow) return { kind: "blocked", error: "project_not_found" };
+      const [activeRenderRow] = await db
+        .select()
+        .from(finalRendersTable)
+        .where(
+          and(
+            eq(finalRendersTable.projectId, render.projectId),
+            inArray(finalRendersTable.status, ["queued", "running"]),
+          ),
+        )
+        .orderBy(desc(finalRendersTable.createdAt))
+        .limit(1);
+      if (activeRenderRow) {
+        return { kind: "reused", render: finalRenderFromRow(activeRenderRow) };
+      }
+      const [activeJob] = await db
+        .select({ id: generationJobsTable.id })
+        .from(generationJobsTable)
+        .where(
+          and(
+            eq(generationJobsTable.projectId, render.projectId),
+            inArray(generationJobsTable.status, ["queued", "running"]),
+          ),
+        )
+        .limit(1);
+      if (activeJob) return { kind: "blocked", error: "generation_in_progress" };
+      const [completedRenderRow] = await db
+        .select()
+        .from(finalRendersTable)
+        .where(
+          and(
+            eq(finalRendersTable.projectId, render.projectId),
+            eq(finalRendersTable.status, "done"),
+            eq(finalRendersTable.manifestJson, JSON.stringify(render.manifest)),
+          ),
+        )
+        .orderBy(desc(finalRendersTable.createdAt))
+        .limit(1);
+      return completedRenderRow
+        ? { kind: "reused", render: finalRenderFromRow(completedRenderRow) }
+        : { kind: "blocked", error: "scenes_not_ready" };
+    },
+    () => memory.reserveRender(ownerId, render),
   );
 }
 
@@ -802,6 +1297,142 @@ export async function transitionOwnedJobFromSnapshot(
       return memory.transitionJobFromSnapshot(jobId, expected, patch);
     },
   );
+}
+
+async function classifyDbGenerationReservation(
+  db: Db,
+  ownerId: string,
+  input: GenerationReservationInput,
+): Promise<GenerationReservationResult> {
+  const [sceneRow] = await db
+    .select()
+    .from(scenesTable)
+    .where(eq(scenesTable.id, input.sceneId))
+    .limit(1);
+  if (!sceneRow) return { kind: "blocked", error: "scene_not_found" };
+  const [projectRow] = await db
+    .select()
+    .from(projectsTable)
+    .where(and(eq(projectsTable.id, sceneRow.projectId), eq(projectsTable.ownerId, ownerId)))
+    .limit(1);
+  if (!projectRow) return { kind: "blocked", error: "scene_not_found" };
+  const scene = await resolveDbSubmissionScene(db, sceneFromRow(sceneRow));
+  const project = projectFromRow(projectRow);
+
+  const [activeJobRow] = await db
+    .select()
+    .from(generationJobsTable)
+    .where(
+      and(
+        eq(generationJobsTable.projectId, project.id),
+        inArray(generationJobsTable.status, ["queued", "running"]),
+      ),
+    )
+    .orderBy(desc(generationJobsTable.createdAt))
+    .limit(1);
+  if (activeJobRow) {
+    const activeJob = processingJobFromRow(activeJobRow);
+    return activeJob.sceneId === scene.id
+      ? { kind: "reused", job: activeJob, project, scene }
+      : { kind: "blocked", error: "project_generation_in_progress", job: activeJob };
+  }
+
+  const [activeRenderRow] = await db
+    .select({ id: finalRendersTable.id })
+    .from(finalRendersTable)
+    .where(
+      and(
+        eq(finalRendersTable.projectId, project.id),
+        inArray(finalRendersTable.status, ["queued", "running"]),
+      ),
+    )
+    .limit(1);
+  if (activeRenderRow) return { kind: "blocked", error: "project_render_in_progress" };
+
+  if (scene.status === "quality_check") {
+    return { kind: "blocked", error: "scene_requires_qc_decision" };
+  }
+  if (scene.status === "queued" || scene.status === "generating") {
+    return { kind: "blocked", error: "scene_generation_inconsistent" };
+  }
+  if (!(["planned", "waiting_previous", "approved", "rejected", "failed"] as const).includes(
+    scene.status as "planned" | "waiting_previous" | "approved" | "rejected" | "failed",
+  )) {
+    return { kind: "blocked", error: "invalid_scene_generation_status" };
+  }
+  if (scene.dependsOnSceneId) {
+    const [previousRow] = await db
+      .select()
+      .from(scenesTable)
+      .where(eq(scenesTable.id, scene.dependsOnSceneId))
+      .limit(1);
+    if (
+      !previousRow ||
+      previousRow.projectId !== scene.projectId ||
+      previousRow.status !== "approved" ||
+      !previousRow.endFrameKey
+    ) {
+      return { kind: "blocked", error: "previous_scene_not_approved" };
+    }
+  }
+  const balance = await getDbCreditBalance(db, ownerId);
+  if (balance < input.requiredCredits) {
+    return {
+      kind: "blocked",
+      error: "insufficient_credits",
+      requiredCredits: input.requiredCredits,
+      balance,
+    };
+  }
+  return { kind: "blocked", error: "scene_generation_inconsistent" };
+}
+
+async function getDbCreditBalance(db: Db, ownerId: string): Promise<number> {
+  const row = await db.$client
+    .prepare(`
+      SELECT balance_after AS balance
+      FROM credit_ledger
+      WHERE owner_id = ?
+      ORDER BY created_at DESC, rowid DESC
+      LIMIT 1
+    `)
+    .bind(ownerId)
+    .first<{ balance: number }>();
+  return row?.balance ?? 0;
+}
+
+async function resolveDbSubmissionScene(db: Db, scene: Scene): Promise<Scene> {
+  if (!scene.dependsOnSceneId) return scene;
+  const [previousRow] = await db
+    .select({ endFrameKey: scenesTable.endFrameKey })
+    .from(scenesTable)
+    .where(eq(scenesTable.id, scene.dependsOnSceneId))
+    .limit(1);
+  return previousRow?.endFrameKey
+    ? { ...scene, startFrameUri: previousRow.endFrameKey }
+    : scene;
+}
+
+async function getDbRenderById(db: Db, renderId: string): Promise<FinalRender | null> {
+  const [row] = await db
+    .select()
+    .from(finalRendersTable)
+    .where(eq(finalRendersTable.id, renderId))
+    .limit(1);
+  return row ? finalRenderFromRow(row) : null;
+}
+
+function finalRenderFromRow(row: typeof finalRendersTable.$inferSelect): FinalRender {
+  return {
+    id: row.id,
+    projectId: row.projectId,
+    status: row.status as FinalRender["status"],
+    manifest: JSON.parse(row.manifestJson) as FinalRender["manifest"],
+    outputVideoUri: row.outputVideoKey,
+    durationSeconds: row.durationSeconds,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
 }
 
 function projectFromRow(row: typeof projectsTable.$inferSelect): Project {

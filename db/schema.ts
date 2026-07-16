@@ -121,6 +121,9 @@ export const generationJobs = sqliteTable(
   },
   (table) => [
     uniqueIndex("generation_jobs_idempotency_idx").on(table.idempotencyKey),
+    uniqueIndex("generation_jobs_one_active_per_project_idx")
+      .on(table.projectId)
+      .where(sql`${table.status} in ('queued', 'running')`),
     index("generation_jobs_project_status_idx").on(table.projectId, table.status),
     check(
       "generation_jobs_extraction_claim_token_check",
@@ -166,7 +169,12 @@ export const finalRenders = sqliteTable(
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
   },
-  (table) => [index("final_renders_project_idx").on(table.projectId, table.createdAt)],
+  (table) => [
+    index("final_renders_project_idx").on(table.projectId, table.createdAt),
+    uniqueIndex("final_renders_one_active_per_project_idx")
+      .on(table.projectId)
+      .where(sql`${table.status} in ('queued', 'running')`),
+  ],
 );
 
 export const creditLedger = sqliteTable(

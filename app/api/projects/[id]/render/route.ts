@@ -1,10 +1,10 @@
 import { NextResponse } from "next/server";
 import { getChatGPTUser } from "../../../../chatgpt-auth";
 import {
-  createOwnedRender,
-  findOwnedActiveRenderForProject,
+  findOwnedActiveJobForProject,
   getOwnedProject,
   listOwnedScenes,
+  reserveOwnedFinalRender,
   updateOwnedRender,
 } from "../../../../../lib/repository";
 import { buildRenderManifest } from "../../../../../lib/render-plan";
@@ -19,6 +19,13 @@ export async function POST(_request: Request, { params }: Context) {
   const { id } = await params;
   const project = await getOwnedProject(user.email, id);
   if (!project) return NextResponse.json({ error: "project_not_found" }, { status: 404 });
+  const activeGeneration = await findOwnedActiveJobForProject(user.email, project.id);
+  if (activeGeneration) {
+    return NextResponse.json(
+      { error: "generation_in_progress", jobId: activeGeneration.id },
+      { status: 409 },
+    );
+  }
   const scenes = await listOwnedScenes(user.email, id);
   if (
     scenes.length === 0 ||
@@ -27,14 +34,6 @@ export async function POST(_request: Request, { params }: Context) {
     return NextResponse.json(
       { error: "scenes_not_ready", message: "Mọi cảnh phải được duyệt trước khi ghép." },
       { status: 409 },
-    );
-  }
-
-  const activeRender = await findOwnedActiveRenderForProject(user.email, project.id);
-  if (activeRender) {
-    return NextResponse.json(
-      { render: { ...activeRender, renderer: "ffmpeg-cloud-run", mediaUrl: null }, reused: true },
-      { status: 202 },
     );
   }
 
@@ -50,9 +49,37 @@ export async function POST(_request: Request, { params }: Context) {
     createdAt: now,
     updatedAt: now,
   };
-  await createOwnedRender(user.email, render);
+  const reservation = await reserveOwnedFinalRender(user.email, render);
+  if (reservation.kind === "blocked") {
+    const error = reservation.error === "generation_in_progress"
+      ? "generation_in_progress"
+      : reservation.error === "project_not_found"
+        ? "project_not_found"
+        : "scenes_not_ready";
+    return NextResponse.json(
+      { error },
+      { status: reservation.error === "project_not_found" ? 404 : 409 },
+    );
+  }
+  if (reservation.kind === "reused") {
+    return NextResponse.json(
+      {
+        render: {
+          ...reservation.render,
+          renderer: "ffmpeg-cloud-run",
+          mediaUrl: reservation.render.status === "done"
+            ? `/api/renders/${reservation.render.id}/media`
+            : null,
+        },
+        reused: true,
+      },
+      { status: 202 },
+    );
+  }
+  const reservedRender = reservation.render;
   const runningRender =
-    (await updateOwnedRender(user.email, render.id, { status: "running" })) ?? render;
+    (await updateOwnedRender(user.email, reservedRender.id, { status: "running" })) ??
+    reservedRender;
   try {
     const dispatch = await dispatchFinalRender({ renderId: render.id, projectId: project.id, manifest });
     const isMockRender = !dispatch && manifest.scenes.every((scene) => scene.sourceUri.startsWith("mock://"));

@@ -1,6 +1,8 @@
 import { env } from "cloudflare:workers";
 import type { AspectRatio, JobStatus, VideoModel } from "./types";
 import { getGoogleAccessToken } from "./google-auth";
+import { ProviderSubmissionError } from "./provider-submission";
+export { ProviderSubmissionError } from "./provider-submission";
 
 export type SubmitVideoRequest = {
   projectId: string;
@@ -70,8 +72,11 @@ type GoogleOperationResponse = {
 
 export class GoogleVeoProvider implements VideoProvider {
   readonly name = "google" as const;
+  private readonly config: GoogleConfig;
 
-  constructor(private readonly config: GoogleConfig) {}
+  constructor(config: GoogleConfig) {
+    this.config = config;
+  }
 
   async submit(request: SubmitVideoRequest): Promise<ProviderOperation> {
     const modelId = googleModelId(request.model);
@@ -84,20 +89,50 @@ export class GoogleVeoProvider implements VideoProvider {
     }
 
     const outputPrefix = `${this.config.outputGcsUri.replace(/\/+$/, "")}/${request.projectId}/${request.sceneId}/`;
-    const response = await this.call(modelId, "predictLongRunning", {
-      instances: [instance],
-      parameters: {
-        aspectRatio: request.aspectRatio,
-        durationSeconds: request.durationSeconds,
-        negativePrompt: request.negativePrompt,
-        personGeneration: "allow_adult",
-        resolution: "1080p",
-        sampleCount: 1,
-        storageUri: outputPrefix,
-        generateAudio: true,
-      },
-    });
-    if (!response.name) throw new Error("Veo did not return an operation name.");
+    let response: GoogleOperationResponse;
+    try {
+      response = await this.call(modelId, "predictLongRunning", {
+        instances: [instance],
+        parameters: {
+          aspectRatio: request.aspectRatio,
+          durationSeconds: request.durationSeconds,
+          negativePrompt: request.negativePrompt,
+          personGeneration: "allow_adult",
+          resolution: "1080p",
+          sampleCount: 1,
+          storageUri: outputPrefix,
+          generateAudio: true,
+        },
+      });
+    } catch (error) {
+      if (error instanceof ProviderPreflightError) {
+        throw new ProviderSubmissionError(
+          error.message,
+          "provider_submission_rejected",
+          false,
+        );
+      }
+      if (error instanceof ProviderHttpError) {
+        const ambiguous = error.status === 408 || error.status === 425 || error.status === 429 || error.status >= 500;
+        throw new ProviderSubmissionError(
+          error.message,
+          ambiguous ? "provider_submission_uncertain" : "provider_submission_rejected",
+          ambiguous,
+        );
+      }
+      throw new ProviderSubmissionError(
+        error instanceof Error ? error.message : "Veo submission result is unknown.",
+        "provider_submission_uncertain",
+        true,
+      );
+    }
+    if (!response.name) {
+      throw new ProviderSubmissionError(
+        "Veo did not return an operation name.",
+        "provider_submission_uncertain",
+        true,
+      );
+    }
     return {
       operationId: response.name,
       status: "queued",
@@ -137,7 +172,14 @@ export class GoogleVeoProvider implements VideoProvider {
   }
 
   private async call(modelId: string, method: string, payload: unknown): Promise<GoogleOperationResponse> {
-    const token = await getGoogleAccessToken(this.config);
+    let token: string;
+    try {
+      token = await getGoogleAccessToken(this.config);
+    } catch (error) {
+      throw new ProviderPreflightError(
+        error instanceof Error ? error.message : "Unable to authenticate the provider request.",
+      );
+    }
     const endpoint = `https://${this.config.location}-aiplatform.googleapis.com/v1/projects/${encodeURIComponent(this.config.projectId)}/locations/${encodeURIComponent(this.config.location)}/publishers/google/models/${modelId}:${method}`;
     const response = await fetch(endpoint, {
       method: "POST",
@@ -147,9 +189,26 @@ export class GoogleVeoProvider implements VideoProvider {
     const result = (await response.json().catch(() => ({}))) as GoogleOperationResponse;
     if (!response.ok) {
       const message = result.error?.message ?? `Vertex AI request failed (${response.status}).`;
-      throw new Error(message);
+      throw new ProviderHttpError(message, response.status);
     }
     return result;
+  }
+}
+
+class ProviderHttpError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ProviderHttpError";
+    this.status = status;
+  }
+}
+
+class ProviderPreflightError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ProviderPreflightError";
   }
 }
 

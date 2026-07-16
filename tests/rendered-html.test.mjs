@@ -53,7 +53,8 @@ test("guards final rendering by approval and reuses an active render", () => {
   const repository = readProjectFile("lib/repository.ts");
 
   assert.match(renderRoute, /scene\.status !== "approved"/);
-  assert.match(renderRoute, /findOwnedActiveRenderForProject/);
+  assert.match(renderRoute, /reserveOwnedFinalRender/);
+  assert.match(renderRoute, /findOwnedActiveJobForProject/);
   assert.match(renderRoute, /status: "running"/);
   assert.match(renderRoute, /status: "failed"/);
   assert.match(repository, /inArray\(finalRendersTable\.status, \["queued", "running"\]\)/);
