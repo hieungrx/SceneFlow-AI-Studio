@@ -25,7 +25,7 @@ Brief
 2. Hệ thống chuẩn hóa brief thành prompt có cấu trúc.
 3. Story Bible xác định nhân vật, sản phẩm, bối cảnh và phong cách chung.
 4. Hệ thống chia nội dung thành storyboard gồm các cảnh có quan hệ phụ thuộc.
-5. Video được tạo tuần tự theo từng cảnh dài 4, 6 hoặc 8 giây.
+5. Video được tạo tuần tự theo từng cảnh; provider contract hỗ trợ 4, 6 hoặc 8 giây, còn storyboard MVP hiện dùng 8 giây.
 6. Người dùng duyệt hoặc từ chối từng cảnh tại bước QC.
 7. Frame cuối của cảnh trước được dùng làm điểm neo continuity cho cảnh sau.
 8. Nếu một cảnh được tạo lại, các cảnh phụ thuộc phía sau sẽ bị vô hiệu hóa và cần tạo lại.
@@ -43,13 +43,13 @@ Brief
 
 ## Trạng thái hiện tại
 
-Checkpoint 2.3 đã hoàn thành nền tảng MVP gồm Studio UI, prompt compiler, Story Bible, storyboard bốn cảnh, pipeline tạo cảnh tuần tự, manual QC, continuity anchor, D1/R2, ownership checks, credit ledger, mock Veo, Google Veo adapter và renderer contract.
+Checkpoint 2.3 đã hoàn thành nền tảng MVP gồm Studio UI, prompt compiler, Story Bible, storyboard bốn cảnh, pipeline tạo cảnh tuần tự, manual QC, continuity anchor, D1/R2, ownership checks, credit ledger, mock Veo, Google Veo adapter và renderer contract. Gate local 2.4A đã bổ sung strict final-render media, bounded asset ingestion, magic-byte validation, exact-key R2 compensation và tài liệu trust boundary cho managed SIWC.
 
 Chế độ local không đăng nhập hiện phù hợp để kiểm tra giao diện và workflow mock. Người dùng có thể dựng storyboard, mô phỏng tạo cảnh, duyệt QC và kiểm tra cơ chế khóa/mở cảnh kế tiếp. Việc ghép trong chế độ này mới dừng ở render plan và video mẫu, chưa tạo một video dài mới từ các cảnh.
 
 ## Những phần cần hoàn thiện trước production
 
-- Hoàn thiện trust boundary cho Sign in with ChatGPT và quyền truy cập deployment.
+- Publish 2.4A và xác minh trust boundary cho Sign in with ChatGPT trên deployment, gồm auth lifecycle, header spoof và direct-origin bypass.
 - Triển khai renderer FFmpeg lên Cloud Run và xác minh output GCS thật.
 - Kiểm thử end-to-end với Google Veo thật.
 - Bổ sung queue production, rate limit, retry và dead-letter handling.

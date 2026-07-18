@@ -185,9 +185,11 @@ Prompt đi qua `compileVideoPrompt()` trước khi gửi provider:
 
 - Chỉ chấp nhận: `image/jpeg`, `image/png`, `image/webp`
 - Kích thước tối đa: 20MB
+- Multipart request bị giới hạn trước khi parse đầy đủ; không chỉ dựa vào `File.size` sau `formData()`
+- MIME khai báo phải khớp magic bytes/container signature được phát hiện; filename không quyết định MIME hoặc extension lưu trữ
 - R2 object key: random UUID — **không bao giờ** dùng filename người dùng làm key
-- MVP hiện allowlist MIME bằng `File.type` phía server nhưng metadata này vẫn có thể bị giả mạo
-- Trước production phải kiểm tra magic bytes/file signature và đối chiếu với MIME; không chỉ tin `Content-Type` hoặc filename
+- Nếu R2 put thành công nhưng ghi asset metadata thất bại, chỉ được compensating delete đúng object key vừa tạo; không xóa theo prefix
+- Magic-byte validation không thay thế full image decode/re-encode; nếu cần chống polyglot hoặc decompression bomb sâu hơn phải có thiết kế riêng được duyệt
 
 ### Auth & Ownership
 

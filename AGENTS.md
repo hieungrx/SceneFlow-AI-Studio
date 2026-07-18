@@ -95,12 +95,13 @@ Chi tiết conventions cho từng layer → xem `CONVENTIONS.md`.
 
 ## 7. Trạng thái hiện tại
 
-**Đã hoàn thành (MVP):** Studio UI · quản lý project · prompt compiler · Story Bible + storyboard 4 cảnh · pipeline tạo cảnh tuần tự · manual QC + khóa frame nối cảnh + private scene playback · D1/R2 + kiểm tra quyền sở hữu dữ liệu · credit ledger append-only · mock Veo + adapter Vertex AI Veo thật · MP4 mẫu phát được · renderer FFmpeg + API contract cho Cloud Run · API tương đối đầy đủ cho pipeline · CI cơ bản. Lint, production build, 141 test/subtest và kiểm tra renderer đều PASS tại baseline Checkpoint 2.3 ngày 2026-07-17.
+**Đã hoàn thành (MVP + Gate local 2.4A):** Studio UI · quản lý project · prompt compiler · Story Bible + storyboard 4 cảnh · pipeline tạo cảnh tuần tự · manual QC + khóa frame nối cảnh + private scene playback · D1/R2 + kiểm tra quyền sở hữu dữ liệu · credit ledger append-only · mock Veo + adapter Vertex AI Veo thật · MP4 mẫu phát được · renderer FFmpeg + API contract cho Cloud Run · strict private scene/final-render media · bounded asset upload + magic-byte validation + exact-key R2 compensation · CI cơ bản. Lint, production build, 180 test/subtest và kiểm tra renderer đều PASS tại Gate local Checkpoint 2.4A ngày 2026-07-18.
 
 **Còn thiếu trước production — không coi các mục này là "đã ổn":**
 - Triển khai renderer FFmpeg lên Cloud Run thật
 - Cấu hình Google Cloud, GCS, quyền service account
 - Test end-to-end với Veo thật (hiện chỉ có mock)
+- Publish 2.4A và xác minh trust boundary trên deployment: auth lifecycle, header spoof và direct-origin bypass
 - Hàng đợi production: rate limit, retry, dead-letter queue
 - Theo dõi chi phí, log, metric, cảnh báo
 - Chính sách hết hạn/xóa media
@@ -109,13 +110,12 @@ Chi tiết conventions cho từng layer → xem `CONVENTIONS.md`.
 - Quota Veo đủ cho ~100 video/ngày nếu đó là mục tiêu
 - Error boundaries và error handling UI phía client
 - Tách `StudioDashboard.tsx` (626 dòng) thành nhiều component nhỏ hơn
-- Xác thực magic bytes/file signature cho ảnh upload; hiện MVP mới kiểm tra MIME metadata từ `File.type`
 
 **⚠️ Quy tắc kiểm tra trạng thái Git — đọc trước khi chạy bất kỳ lệnh git nào:**
 - Luôn kiểm tra `git status --short` và `git log -1 --oneline` trước thao tác Git; không giả định snapshot trong tài liệu vẫn còn đúng.
-- Tại lần cập nhật tài liệu ngày 2026-07-11, repo chưa có commit đầu tiên và toàn bộ code chưa được theo dõi.
+- Repo hiện đã có lịch sử commit; vẫn phải đọc trạng thái thật thay vì suy luận từ checkpoint hoặc tài liệu.
 - KHÔNG tự ý chạy `git init`, `git commit`, `git push`, tạo branch, rebase hoặc thao tác phá hủy lịch sử khi chưa được người dùng xác nhận.
-- Nếu repo vẫn chưa có commit mà task yêu cầu sửa code, đề xuất tạo baseline commit trước; chỉ thực hiện commit khi người dùng cho phép.
+- Chỉ thực hiện commit khi người dùng cho phép, kể cả khi task code và verification đã hoàn tất.
 
 ## 8. Ranh giới quyết định
 
@@ -164,12 +164,9 @@ Nếu phát hiện mâu thuẫn giữa tài liệu và code thật → dừng l�
 
 ## 12. Việc nên làm tiếp để hoàn thiện tài liệu
 
-SceneFlow hiện có AGENTS.md + CONVENTIONS.md. Nên tách dần thêm:
+SceneFlow hiện có `AGENTS.md`, `CONVENTIONS.md`, `ARCHITECTURE.md`, `DECISIONS.md`, `PRODUCT_OVERVIEW.md` và `SPRINT.md`. Tài liệu nên tiếp tục được tách dần:
 
-- `ARCHITECTURE.md` — từ mục 2, 5 (diagram, data flow, component interactions)
 - `BUSINESS_RULES.md` — từ mục 2 (ràng buộc nghiệp vụ) + mục 6
-- `DECISIONS.md` — lý do chọn D1 thay Postgres, lý do adapter pattern cho Veo, lý do FFmpeg tách service độc lập — **hiện chưa có, cần viết mới**
-- `SPRINT.md` — task đang làm, tách khỏi mục 7
 - `DATABASE.md` — schema D1 chi tiết, migration strategy — **hiện chưa có, cần viết mới**
 
 Khi đó, file AGENTS.md này sẽ ngắn lại, chỉ giữ mục 1, 3, 4, 8, 9, 10, 11 — các mục còn lại trỏ sang file chuyên biệt tương ứng.

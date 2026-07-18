@@ -585,7 +585,12 @@ function errorLabel(code?: string): string | null {
     provider_submission_failed: "Provider từ chối yêu cầu; credit đã được hoàn lại.",
     generation_in_progress: "Hãy chờ cảnh đang tạo hoàn tất trước khi ghép video.",
     scenes_not_ready: "Mọi cảnh phải hoàn tất trước khi ghép.",
+    invalid_asset_payload: "Dữ liệu ảnh tải lên không hợp lệ.",
+    unsupported_asset: "Chỉ nhận ảnh JPG, PNG hoặc WebP hợp lệ, tối đa 20 MB.",
+    asset_request_too_large: "Ảnh tải lên vượt giới hạn 20 MB.",
+    asset_ingestion_unavailable: "Dịch vụ tiếp nhận ảnh tạm thời chưa sẵn sàng.",
     media_storage_unavailable: "Kho ảnh tham chiếu chưa sẵn sàng.",
+    asset_metadata_unavailable: "Không thể hoàn tất việc lưu ảnh tham chiếu. Vui lòng thử lại.",
   };
   return labels[code] ?? `Có lỗi xảy ra: ${code}`;
 }

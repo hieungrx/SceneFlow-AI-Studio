@@ -1,6 +1,6 @@
 # SceneFlow AI
 
-Xưởng video tự động: biến một brief thành storyboard có continuity, tạo từng cảnh 4/6/8 giây bằng Veo, kiểm tra chất lượng, rồi ghép thành một video dài trên timeline chung.
+Xưởng video tự động: biến một brief thành storyboard có continuity, tạo từng cảnh bằng Veo, kiểm tra chất lượng, rồi ghép thành một video dài trên timeline chung. Provider contract hỗ trợ 4/6/8 giây; storyboard MVP hiện dùng cảnh 8 giây.
 
 ## Trạng thái triển khai
 
@@ -8,9 +8,10 @@ Xưởng video tự động: biến một brief thành storyboard có continuity
 | --- | --- | --- |
 | 01 | Studio UI, tạo dự án, đăng nhập ChatGPT | Hoàn tất MVP |
 | 02 | Prompt compiler, Story Bible, storyboard 4 cảnh | Hoàn tất MVP |
-| 03 | Hàng đợi, phụ thuộc cảnh trước, QC mô phỏng | Hoàn tất MVP |
+| 03 | Job state + polling, phụ thuộc cảnh trước, manual QC + continuity | Hoàn tất MVP |
 | 04 | D1, R2, quyền sở hữu, credit ledger, Veo adapter | Hoàn tất nền tảng |
 | 05 | Render mock có MP4 xem trước; FFmpeg production | Mock hoàn tất, production cần hạ tầng |
+| 06 | Trust boundary, private final media, upload hardening | 2.4A local PASS; chờ deployment verification |
 
 Mặc định hệ thống chạy `mock` để không tiêu tiền. Khi cấu hình Google Cloud, factory trong `lib/veo-provider.ts` chuyển sang API thật mà không thay đổi giao diện hay route.
 
@@ -102,7 +103,8 @@ Model mapping:
 - D1 tự khởi tạo schema idempotent ở request đầu tiên; migration chuẩn nằm trong `drizzle/0000_sceneflow_initial.sql`.
 - Mọi route ghi dữ liệu yêu cầu Sign in with ChatGPT.
 - Project, scene, job và asset luôn được kiểm tra theo email chủ sở hữu ở server.
-- Ảnh chỉ nhận JPG/PNG/WebP tối đa 20 MB; file được lưu bằng object key ngẫu nhiên, không dùng tên file làm đường dẫn.
+- Ảnh chỉ nhận JPG/PNG/WebP tối đa 20 MB; request multipart bị giới hạn trước hoặc trong khi parse và MIME phải khớp magic bytes thực tế.
+- File được lưu bằng object key ngẫu nhiên; filename không quyết định key, MIME hoặc extension. Lỗi metadata sau R2 put kích hoạt exact-key compensating delete.
 - Credit được ghi theo sổ cái append-only; API kiểm tra số dư trước khi gửi job.
 
 ## API chính
@@ -118,7 +120,9 @@ Model mapping:
 - `GET /api/renders/:id/media` — mở MP4 mock hoặc stream video GCS riêng tư, hỗ trợ HTTP Range.
 - `GET /api/credits` — số dư credit hiện tại.
 
-Scene media chỉ nhận request không có `Range` hoặc đúng một byte range dạng `bytes=start-end`, `bytes=start-`, `bytes=-suffix`. Range sai hoặc nhiều range trả `416` trước khi truy cập GCS; response GCS chỉ được stream inline khi là `video/mp4` và trạng thái `200`/`206`/`416` nhất quán. Lỗi xác thực upstream, MIME hoặc giao thức đều được thu gọn thành lỗi `502` an toàn, không chuyển tiếp body lỗi của Google.
+Scene media và final-render media chỉ nhận request không có `Range` hoặc đúng một byte range dạng `bytes=start-end`, `bytes=start-`, `bytes=-suffix`. Range sai hoặc nhiều range trả `416` trước khi truy cập GCS; response GCS chỉ được stream inline khi là `video/mp4` và trạng thái `200`/`206`/`416` nhất quán. Lỗi xác thực upstream, MIME hoặc giao thức đều được thu gọn thành lỗi `502` an toàn, không chuyển tiếp body lỗi của Google.
+
+Kiến trúc và các quyết định đã duyệt được ghi tại `ARCHITECTURE.md` và `DECISIONS.md`.
 
 ## Để chạy 100 video/ngày
 

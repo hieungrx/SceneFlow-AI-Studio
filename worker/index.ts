@@ -41,6 +41,9 @@ const worker = {
       }, allowedWidths);
     }
 
+    // Sites dispatch owns SIWC and injects authenticated-user headers before
+    // this entry point. Deployment access policy is therefore part of the auth
+    // boundary; do not expose this Worker as a separate public origin.
     return handler.fetch(request, env, ctx);
   },
 };

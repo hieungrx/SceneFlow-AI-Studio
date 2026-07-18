@@ -44,6 +44,38 @@ Cho phép người dùng xem đầu ra từng cảnh, tự duyệt hoặc từ c
 
 ## Checkpoint 2.4 — Production Trust Boundary & E2E Readiness
 
-**Trạng thái:** Chưa bắt đầu; từng thay đổi contract/hạ tầng phải được phê duyệt trước.
+**Trạng thái:** Đang thực hiện. Gate local 2.4A PASS; verification trên deployment mới còn chờ publish. 2.4B chưa bắt đầu.
 
 Thứ tự đề xuất: auth origin → final-render media → asset ingestion → Cloud Run/GCS staging → real Veo E2E → queue/observability/lifecycle.
+
+### Checkpoint 2.4A — Security gate
+
+**Ngày hoàn tất implementation local:** 2026-07-18
+
+#### Phạm vi đã hoàn thành
+
+- Chốt trust boundary dùng Sites dispatcher sở hữu SIWC, giữ `access_mode=custom` và không thêm auth stack riêng trong SceneFlow.
+- Ghi rõ invariant không được để raw Worker origin trở thành đường public bypass dispatcher.
+- Final-render media dùng cùng helper/chính sách strict Range, MIME và safe upstream error như scene media.
+- Asset upload áp hard request cap trước hoặc trong khi parse multipart bằng counting stream, giữ giới hạn 20 MiB/file và xác minh magic bytes JPG/PNG/WebP.
+- MIME và extension lưu trữ lấy từ file signature đã phát hiện, không lấy từ filename.
+- Nếu R2 put thành công nhưng ghi metadata thất bại, route thử xóa bù đúng object key vừa tạo; lỗi cleanup không lộ chi tiết nội bộ.
+- Quota cộng dồn theo user/project được hoãn sang phase lifecycle/capacity; không đổi schema trong 2.4A.
+
+#### Bằng chứng Gate local
+
+- Targeted suites mới: **39/39 test/subtest PASS** cho final-render media, asset validation, bounded multipart và asset route failure compensation.
+- `npm run verify`: lint sạch, production build thành công, **180/180 test/subtest PASS** và renderer syntax hợp lệ.
+- Invalid hoặc multi-range final-render trả local `416` với 0 lần gọi GCS; upstream status/MIME/header sai được thu gọn thành safe `502`.
+- Request upload quá cap hoặc MIME/signature sai không chạm R2; DB failure sau R2 put gọi exact-key delete.
+- Không đổi schema/migration D1, provider selection, renderer contract, credit ledger hoặc continuity chain.
+
+#### Gate deployment còn lại
+
+- Publish một Sites version chứa 2.4A và xác nhận unauthenticated, logout/hết phiên, owner/non-owner trên deployment.
+- Xác nhận request tự gắn identity header hoặc đường gọi origin trực tiếp không thể bypass Sites dispatcher.
+- Việc publish/commit/push chưa được thực hiện trong implementation local này.
+
+### Bước tiếp theo
+
+Checkpoint 2.4B: Cloud Run/GCS staging, secret/IAM tối thiểu quyền và renderer canary trước real Veo E2E.

@@ -1,21 +1,33 @@
 import { NextResponse } from "next/server";
 import { getChatGPTUser } from "../../chatgpt-auth";
-import { putProjectAsset } from "../../../lib/media-store";
+import {
+  MAX_ASSET_FILE_BYTES,
+  validateAssetFile,
+} from "../../../lib/asset-validation";
+import { parseBoundedMultipartFormData } from "../../../lib/bounded-multipart-request";
+import { deleteProjectAsset, putProjectAsset } from "../../../lib/media-store";
 import { createOwnedAsset, getOwnedProject } from "../../../lib/repository";
 import type { AssetKind } from "../../../lib/types";
 
-const MAX_FILE_BYTES = 20 * 1024 * 1024;
-const ALLOWED_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const ALLOWED_KINDS = new Set<AssetKind>(["product", "character", "environment", "keyframe"]);
 
 export async function POST(request: Request) {
   const user = await getChatGPTUser();
   if (!user) return NextResponse.json({ error: "authentication_required" }, { status: 401 });
 
-  const form = await request.formData().catch(() => null);
-  const file = form?.get("file");
-  const projectId = form?.get("projectId");
-  const kind = form?.get("kind");
+  const parsedForm = await parseBoundedMultipartFormData(request);
+  if (!parsedForm.ok) {
+    const error = parsedForm.status === 413
+      ? "asset_request_too_large"
+      : parsedForm.status === 500
+        ? "asset_ingestion_unavailable"
+        : "invalid_asset_payload";
+    return NextResponse.json({ error }, { status: parsedForm.status });
+  }
+
+  const file = parsedForm.formData.get("file");
+  const projectId = parsedForm.formData.get("projectId");
+  const kind = parsedForm.formData.get("kind");
   if (
     !(file instanceof File) ||
     typeof projectId !== "string" ||
@@ -27,47 +39,70 @@ export async function POST(request: Request) {
   if (!(await getOwnedProject(user.email, projectId))) {
     return NextResponse.json({ error: "project_not_found" }, { status: 404 });
   }
-  if (!ALLOWED_TYPES.has(file.type) || file.size <= 0 || file.size > MAX_FILE_BYTES) {
-    return NextResponse.json(
-      { error: "unsupported_asset", message: "Chỉ nhận JPG, PNG, WebP tối đa 20 MB." },
-      { status: 415 },
-    );
+  if (file.size > MAX_ASSET_FILE_BYTES) {
+    return NextResponse.json({ error: "asset_request_too_large" }, { status: 413 });
+  }
+
+  const validation = await validateAssetFile(file, file.type);
+  if (!validation.ok) {
+    if (validation.error === "asset_read_failed") {
+      return NextResponse.json({ error: "invalid_asset_payload" }, { status: 400 });
+    }
+    const status = validation.error === "asset_too_large" ? 413 : 415;
+    const error = status === 413 ? "asset_request_too_large" : "unsupported_asset";
+    return NextResponse.json({ error }, { status });
   }
 
   const id = `asset_${crypto.randomUUID()}`;
-  const extension = extensionFor(file.type);
-  const r2Key = `projects/${projectId}/references/${id}.${extension}`;
+  const r2Key = `projects/${projectId}/references/${id}.${validation.format.extension}`;
   try {
     await putProjectAsset({
       key: r2Key,
-      bytes: await file.arrayBuffer(),
-      contentType: file.type,
+      body: file,
+      contentType: validation.format.mimeType,
       ownerId: user.email,
       projectId,
       kind,
       originalName: file.name.slice(0, 160),
     });
-  } catch (error) {
-    return NextResponse.json(
-      { error: "media_storage_unavailable", message: error instanceof Error ? error.message : "R2 unavailable" },
-      { status: 503 },
-    );
+  } catch {
+    return NextResponse.json({ error: "media_storage_unavailable" }, { status: 503 });
   }
 
-  const asset = await createOwnedAsset(user.email, {
-    id,
-    projectId,
-    kind: kind as AssetKind,
-    r2Key,
-    filename: file.name.slice(0, 160),
-    contentType: file.type,
-    sizeBytes: file.size,
-  });
+  let asset: Awaited<ReturnType<typeof createOwnedAsset>>;
+  try {
+    asset = await createOwnedAsset(user.email, {
+      id,
+      projectId,
+      kind: kind as AssetKind,
+      r2Key,
+      filename: file.name.slice(0, 160),
+      contentType: validation.format.mimeType,
+      sizeBytes: validation.sizeBytes,
+    });
+  } catch {
+    await compensateFailedAssetMetadata(r2Key, id, projectId);
+    return NextResponse.json({ error: "asset_metadata_unavailable" }, { status: 503 });
+  }
+  if (!asset) {
+    await compensateFailedAssetMetadata(r2Key, id, projectId);
+    return NextResponse.json({ error: "project_not_found" }, { status: 404 });
+  }
   return NextResponse.json({ asset }, { status: 201 });
 }
 
-function extensionFor(contentType: string): string {
-  if (contentType === "image/png") return "png";
-  if (contentType === "image/webp") return "webp";
-  return "jpg";
+async function compensateFailedAssetMetadata(
+  r2Key: string,
+  assetId: string,
+  projectId: string,
+): Promise<void> {
+  try {
+    await deleteProjectAsset(r2Key);
+  } catch (error) {
+    console.error("asset_compensating_delete_failed", {
+      assetId,
+      projectId,
+      errorType: error instanceof Error ? error.name : "UnknownError",
+    });
+  }
 }

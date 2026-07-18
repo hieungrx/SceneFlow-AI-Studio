@@ -7,6 +7,10 @@ export type ChatGPTUser = {
   fullName: string | null;
 };
 
+// Trust boundary: these identity headers are authoritative only when the
+// request is dispatched through Sites-managed Sign in with ChatGPT. The raw
+// Worker origin must not be exposed as an alternate application entry point.
+
 const USER_EMAIL_HEADER = "oai-authenticated-user-email";
 const USER_FULL_NAME_HEADER = "oai-authenticated-user-full-name";
 const USER_FULL_NAME_ENCODING_HEADER =

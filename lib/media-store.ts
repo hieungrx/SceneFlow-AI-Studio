@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 
 export async function putProjectAsset(input: {
   key: string;
-  bytes: ArrayBuffer;
+  body: Blob;
   contentType: string;
   ownerId: string;
   projectId: string;
@@ -10,7 +10,7 @@ export async function putProjectAsset(input: {
   originalName: string;
 }): Promise<void> {
   if (!env.MEDIA) throw new Error("R2 binding `MEDIA` is unavailable.");
-  await env.MEDIA.put(input.key, input.bytes, {
+  await env.MEDIA.put(input.key, input.body, {
     httpMetadata: { contentType: input.contentType },
     customMetadata: {
       ownerId: input.ownerId,
@@ -19,4 +19,9 @@ export async function putProjectAsset(input: {
       originalName: input.originalName,
     },
   });
+}
+
+export async function deleteProjectAsset(key: string): Promise<void> {
+  if (!env.MEDIA) throw new Error("R2 binding `MEDIA` is unavailable.");
+  await env.MEDIA.delete(key);
 }
