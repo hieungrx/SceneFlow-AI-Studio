@@ -44,7 +44,7 @@ Cho phép người dùng xem đầu ra từng cảnh, tự duyệt hoặc từ c
 
 ## Checkpoint 2.4 — Production Trust Boundary & E2E Readiness
 
-**Trạng thái:** Đang thực hiện. Gate local 2.4A PASS; verification trên deployment mới còn chờ publish. 2.4B chưa bắt đầu.
+**Trạng thái:** Đang thực hiện. Gate local 2.4A PASS và production đã được publish; edge probes unauthenticated/header-spoof PASS. Kiểm tra tương tác bằng phiên owner/non-owner và logout/session-expiry còn chờ. 2.4B chưa bắt đầu.
 
 Thứ tự đề xuất: auth origin → final-render media → asset ingestion → Cloud Run/GCS staging → real Veo E2E → queue/observability/lifecycle.
 
@@ -70,12 +70,13 @@ Thứ tự đề xuất: auth origin → final-render media → asset ingestion 
 - Request upload quá cap hoặc MIME/signature sai không chạm R2; DB failure sau R2 put gọi exact-key delete.
 - Không đổi schema/migration D1, provider selection, renderer contract, credit ledger hoặc continuity chain.
 
-#### Gate deployment còn lại
+#### Kết quả publish và gate deployment
 
-- Publish một Sites version chứa 2.4A và xác nhận unauthenticated, logout/hết phiên, owner/non-owner trên deployment.
-- Xác nhận request tự gắn identity header hoặc đường gọi origin trực tiếp không thể bypass Sites dispatcher.
-- Việc publish/commit/push chưa được thực hiện trong implementation local này.
+- Production Sites đã publish ngày 2026-07-18 từ đúng commit 2.4A; access policy vẫn là `custom`, chỉ một user được phép và không có group.
+- Request API chưa đăng nhập trả `403`; request tự gắn `oai-authenticated-user-*` cũng trả `403`, nên spoofed identity header không bypass dispatcher public.
+- Phiên browser automation không thuộc allowlist và nhận `Access Denied`, đúng với custom access policy nhưng không thay thế kiểm tra bằng phiên owner thật.
+- Còn phải xác nhận owner flow, non-owner flow, logout/session-expiry và direct-origin reachability bằng phiên/môi trường triển khai phù hợp trước khi coi toàn bộ deployment gate đã đóng.
 
 ### Bước tiếp theo
 
-Checkpoint 2.4B: Cloud Run/GCS staging, secret/IAM tối thiểu quyền và renderer canary trước real Veo E2E.
+Hoàn tất các kiểm tra SIWC tương tác còn lại, sau đó bắt đầu Checkpoint 2.4B: Cloud Run/GCS staging, secret/IAM tối thiểu quyền và renderer canary trước real Veo E2E.

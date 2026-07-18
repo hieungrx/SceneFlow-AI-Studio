@@ -1,6 +1,6 @@
 # ARCHITECTURE.md — Kiến trúc SceneFlow AI Studio
 
-> Tài liệu này mô tả kiến trúc hiện tại sau Gate local Checkpoint 2.4A. Code và test local đã hoàn tất; verification trust boundary trên Sites deployment mới vẫn phải chạy sau khi publish.
+> Tài liệu này mô tả kiến trúc hiện tại sau Checkpoint 2.4A. Code/test local và production publish đã hoàn tất; edge probes unauthenticated/header-spoof PASS, còn SIWC interaction checks bằng phiên owner/non-owner vẫn phải hoàn tất.
 
 ## 1. Mục tiêu kiến trúc
 
@@ -184,8 +184,8 @@ Implementation 2.4A hiện tại:
 | D1/R2, ownership, credit ledger | Hoàn tất nền tảng MVP |
 | Scene private media strict Range/MIME | Hoàn tất Checkpoint 2.3 |
 | Managed SIWC tại Sites dispatcher, `access_mode=custom` | Deployment contract đã xác nhận cho 2.4A |
-| Final-render strict Range/MIME | Gate local PASS; chờ deployment verification |
-| Upload magic bytes, bounded request, exact-key compensation | Gate local PASS; chờ deployment verification |
+| Final-render strict Range/MIME | Gate local PASS; production đã publish |
+| Upload magic bytes, bounded request, exact-key compensation | Gate local PASS; production đã publish |
 | Cumulative upload quota | Hoãn; không thuộc 2.4A |
 | Cloud Run/GCS staging, real Veo E2E | Chưa triển khai production |
 | Production queue, observability, lifecycle | Chưa triển khai |

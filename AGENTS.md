@@ -101,7 +101,7 @@ Chi tiết conventions cho từng layer → xem `CONVENTIONS.md`.
 - Triển khai renderer FFmpeg lên Cloud Run thật
 - Cấu hình Google Cloud, GCS, quyền service account
 - Test end-to-end với Veo thật (hiện chỉ có mock)
-- Publish 2.4A và xác minh trust boundary trên deployment: auth lifecycle, header spoof và direct-origin bypass
+- Hoàn tất trust-boundary verification trên deployment 2.4A: owner/non-owner, logout/session-expiry và direct-origin reachability; unauthenticated/header-spoof edge probes đã PASS
 - Hàng đợi production: rate limit, retry, dead-letter queue
 - Theo dõi chi phí, log, metric, cảnh báo
 - Chính sách hết hạn/xóa media

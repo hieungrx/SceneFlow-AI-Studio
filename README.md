@@ -11,7 +11,7 @@ Xưởng video tự động: biến một brief thành storyboard có continuity
 | 03 | Job state + polling, phụ thuộc cảnh trước, manual QC + continuity | Hoàn tất MVP |
 | 04 | D1, R2, quyền sở hữu, credit ledger, Veo adapter | Hoàn tất nền tảng |
 | 05 | Render mock có MP4 xem trước; FFmpeg production | Mock hoàn tất, production cần hạ tầng |
-| 06 | Trust boundary, private final media, upload hardening | 2.4A local PASS; chờ deployment verification |
+| 06 | Trust boundary, private final media, upload hardening | 2.4A đã publish; edge probes PASS, chờ SIWC interaction checks |
 
 Mặc định hệ thống chạy `mock` để không tiêu tiền. Khi cấu hình Google Cloud, factory trong `lib/veo-provider.ts` chuyển sang API thật mà không thay đổi giao diện hay route.
 

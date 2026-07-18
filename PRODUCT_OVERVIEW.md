@@ -49,7 +49,7 @@ Chế độ local không đăng nhập hiện phù hợp để kiểm tra giao d
 
 ## Những phần cần hoàn thiện trước production
 
-- Publish 2.4A và xác minh trust boundary cho Sign in with ChatGPT trên deployment, gồm auth lifecycle, header spoof và direct-origin bypass.
+- Hoàn tất trust-boundary verification cho Sign in with ChatGPT trên deployment 2.4A: owner/non-owner, logout/session-expiry và direct-origin reachability. Production đã publish; unauthenticated/header-spoof edge probes đã PASS.
 - Triển khai renderer FFmpeg lên Cloud Run và xác minh output GCS thật.
 - Kiểm thử end-to-end với Google Veo thật.
 - Bổ sung queue production, rate limit, retry và dead-letter handling.
