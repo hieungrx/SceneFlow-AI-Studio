@@ -222,6 +222,44 @@ Phản hồi thành công chỉ chứa metadata; signed URL không bị phản c
 
 ## Triển khai Cloud Run
 
+### Snapshot staging Checkpoint 2.4B
+
+Staging đã được xác nhận ngày 2026-07-19:
+
+| Thành phần | Giá trị |
+| --- | --- |
+| Project | `project-c23ce61c-905d-4b2d-8e1` (`194278159531`) |
+| Region | `us-central1` |
+| Service / revision | `sceneflow-renderer-staging` / `sceneflow-renderer-staging-2-4b-01` |
+| Image | `sceneflow-staging/sceneflow-renderer@sha256:b9c9afaf3253a6875af2c2ddc364e2d5d91f93b941accdbda7ab8f11f17647a5` |
+| Runtime identity | `sceneflow-renderer-stg@project-c23ce61c-905d-4b2d-8e1.iam.gserviceaccount.com` |
+| Secret | `sceneflow-renderer-auth-staging:2` |
+| Private bucket | `sceneflow-staging-media-project-c23ce61c-905d-4b2d-8e1` |
+
+Cloud Run dùng gen2, 2 CPU, 4 GiB, timeout 600 giây, concurrency 1, min instance 0 và
+max instance 1. Staging giới hạn 4 clip, 128 MiB mỗi input và 256 MiB tổng input. Bucket bật
+uniform bucket-level access, public access prevention, soft delete 0; lifecycle xóa `input/` sau
+3 ngày và `output/`/`failed/` sau 7 ngày. Runtime service account đọc object staging và có
+`roles/storage.objectUser` với IAM condition chỉ dưới `output/`.
+
+Canary đã xác nhận: health `200`; thiếu token `401`; render 4 clip thành H.264 `1080×1920`,
+24 fps + AAC 48 kHz stereo; extraction v2 `201 created` → `200 replayed`; binding conflict `409`;
+anonymous GCS `403`; authenticated Range `206`. Revision cũ vẫn có thể dùng làm rollback:
+
+```bash
+gcloud run services update-traffic sceneflow-renderer-staging \
+  --project=project-c23ce61c-905d-4b2d-8e1 \
+  --region=us-central1 \
+  --to-revisions=sceneflow-renderer-staging-00002-d64=100
+```
+
+Staging hiện cho phép platform-level unauthenticated invocation vì caller Sites/Cloudflare chưa
+tạo Google ID token; shared secret vẫn bắt buộc trên media endpoints. Đây là cấu hình canary có
+`max-instances=1`, chưa phải trust boundary cho production scale. Không nối `RENDER_SERVICE_*`
+vào Studio khi scene source còn là `mock://`.
+
+### Mẫu triển khai mới
+
 Tạo secret và service account riêng, sau đó cấp quyền đọc bucket chứa output của Veo. Contract v2
 còn cần quyền đọc, tạo và cập nhật object trong bucket kết quả vì operation record là mutable bằng
 generation CAS. Việc cấp quyền IAM là thao tác vận hành riêng; source code này không tự cấp hoặc
@@ -241,11 +279,14 @@ gcloud run deploy sceneflow-renderer \
   --image REGION-docker.pkg.dev/PROJECT_ID/sceneflow/renderer \
   --region REGION \
   --service-account sceneflow-renderer@PROJECT_ID.iam.gserviceaccount.com \
-  --set-secrets RENDERER_AUTH_TOKEN=renderer-auth-token:latest \
-  --cpu 4 --memory 8Gi --timeout 3600 --concurrency 2 \
+  --set-secrets RENDERER_AUTH_TOKEN=renderer-auth-token:1 \
+  --cpu 2 --memory 4Gi --timeout 600 --concurrency 1 \
+  --min-instances 0 --max-instances 1 \
   --no-allow-unauthenticated
 ```
 
 Nếu caller không thể tạo Google identity token (ví dụ Worker ở edge), có thể dùng `--allow-unauthenticated`; các endpoint media vẫn đóng bằng `X-Renderer-Token`. Với backend chạy trên Google Cloud, giữ `--no-allow-unauthenticated`, gửi Google ID token qua `Authorization` và shared secret qua `X-Renderer-Token`.
 
-Cloud Run cần đủ ephemeral disk cho tổng input cộng output của các job đồng thời. Khi render hàng loạt, đặt Cloud Tasks/Pub/Sub phía trước renderer, dùng idempotency ở backend và không retry mù các lỗi `400/413/422`.
+Filesystem ghi được mặc định của Cloud Run nằm trong memory, nên input, normalized clip và output
+đều phải nằm trong memory budget của instance. Khi render hàng loạt, đặt Cloud Tasks/Pub/Sub phía
+trước renderer, dùng idempotency ở backend và không retry mù các lỗi `400/413/422`.

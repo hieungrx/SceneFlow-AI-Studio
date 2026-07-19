@@ -126,3 +126,37 @@ Quota cộng dồn theo user/project cần policy sản phẩm, cách tính usag
 
 - Gắn quota upload tạm thời vào credit ledger hiện tại.
 - Thêm một giới hạn cộng dồn tùy ý mà chưa có lifecycle và capacity policy.
+
+## ADR-005 — Renderer staging dùng application token và IAM theo prefix
+
+- **Trạng thái:** Accepted
+- **Ngày xác nhận:** 2026-07-19
+- **Phạm vi:** Checkpoint 2.4B — Cloud Run/GCS renderer staging
+
+### Bối cảnh
+
+Renderer client hiện gửi shared secret trong `X-Renderer-Token` nhưng caller Sites/Cloudflare chưa mint Google-signed ID token cho Cloud Run. Giữ Cloud Run private bằng IAM sẽ chặn request trước khi tới renderer. Staging dùng một bucket private với các prefix `input/`, `output/` và `failed/`; extraction v2 cần cập nhật durable operation record bằng generation precondition, nên `objectCreator` đơn thuần không đủ.
+
+### Quyết định
+
+- Staging Cloud Run cho phép platform-level unauthenticated invocation và dùng `ingress=all`; mọi endpoint xử lý media vẫn bắt buộc shared secret qua `X-Renderer-Token`.
+- Health endpoint không yêu cầu token và không nhận media hoặc dữ liệu user.
+- Giới hạn staging ở concurrency 1, min instance 0 và max instance 1 để chặn scale ngoài ý muốn khi endpoint có thể bị Internet chạm tới.
+- GCS bật uniform bucket-level access và public access prevention; anonymous object access phải bị từ chối.
+- Runtime service account có quyền đọc object staging và `roles/storage.objectUser` với IAM condition chỉ áp dụng dưới `output/`; không giữ quyền tạo object không điều kiện trên toàn bucket.
+- Secret được lấy từ Secret Manager và pin theo version; không ghi token vào source, command output hoặc log.
+- Chưa cấu hình Studio gọi renderer khi provider còn mock; canary gọi trực tiếp bằng private GCS URI.
+
+### Hệ quả và đánh đổi
+
+- Không đổi renderer API contract, provider boundary hoặc continuity contract trong 2.4B.
+- Request thiếu/sai token bị từ chối ở application layer, nhưng vẫn có thể làm Cloud Run nhận request và phát sinh chi phí/DoS giới hạn; max instance 1 chỉ giảm chứ không loại bỏ rủi ro.
+- Một secret bị lộ có thể gọi renderer staging; trước production scale nên thêm Google ID-token/WIF hoặc một ingress bảo vệ tương đương.
+- IAM theo prefix cho phép extraction v2 cập nhật operation record mà không trao quyền sửa `input/`.
+- `/extract-last-frame` v2 replay idempotent; `/render` vẫn cần một quyết định riêng về durable idempotency và retry.
+
+### Không chọn
+
+- Giữ `--no-allow-unauthenticated` trong khi caller không có Google ID token rồi coi integration là hoạt động.
+- Cấp `Storage Admin`, `Editor` hoặc quyền ghi không giới hạn cho renderer runtime service account.
+- Bật renderer trong Studio mock và gửi URI `mock://` tới Cloud Run.

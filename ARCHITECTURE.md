@@ -1,6 +1,6 @@
 # ARCHITECTURE.md — Kiến trúc SceneFlow AI Studio
 
-> Tài liệu này mô tả kiến trúc hiện tại sau Checkpoint 2.4A. Code/test local và production publish đã hoàn tất; edge probes unauthenticated/header-spoof PASS, còn SIWC interaction checks bằng phiên owner/non-owner vẫn phải hoàn tất.
+> Tài liệu này mô tả kiến trúc hiện tại sau Checkpoint 2.4B. Code/test local, production Sites 2.4A và renderer Cloud Run/GCS staging 2.4B đã hoàn tất; real Veo E2E và các SIWC interaction checks còn lại vẫn phải hoàn tất.
 
 ## 1. Mục tiêu kiến trúc
 
@@ -17,7 +17,7 @@ Kiến trúc phải giữ bốn invariant nghiệp vụ:
 - Cảnh sau chỉ được tạo khi cảnh trước đã vượt QC.
 - Frame cuối của cảnh trước là điểm neo continuity cho cảnh kế tiếp.
 
-Output production là video 1080p đã ghép hoàn chỉnh. Baseline local vẫn dùng video mẫu để kiểm tra workflow mà không gọi Veo hoặc renderer production.
+Output production là video 1080p đã ghép hoàn chỉnh. Studio hiện vẫn dùng mock để kiểm tra workflow, còn renderer staging đã ghép MP4 mẫu thật trên Cloud Run/GCS mà chưa gọi Veo.
 
 ## 2. Sơ đồ hệ thống
 
@@ -46,7 +46,7 @@ flowchart LR
   API --> GCS
 ```
 
-Các đường nối không thể hiện rằng mọi dịch vụ production đã được triển khai. Veo thật, Cloud Run/GCS staging và renderer production vẫn thuộc roadmap sau 2.4A.
+Các đường nối không có nghĩa mọi dịch vụ đã nối vào production. Cloud Run/GCS renderer staging đã canary PASS trong 2.4B; Veo thật, Worker-to-renderer wiring và production-scale queue/observability vẫn thuộc roadmap.
 
 ## 3. Trust boundary và Sign in with ChatGPT
 
@@ -125,6 +125,15 @@ Không viết Drizzle query ngoài repository layer, không đưa binding Cloudf
 3. Production target gửi manifest đến FFmpeg renderer độc lập.
 4. Output private được lưu ở GCS và chỉ được phát qua API đã kiểm tra auth/ownership.
 
+### 5.3. Renderer staging 2.4B
+
+- Cloud Run, Artifact Registry và GCS staging cùng ở `us-central1`.
+- Revision đang phục vụ là `sceneflow-renderer-staging-2-4b-01`, pin image bằng digest bất biến.
+- Cloud Run nhận request từ Internet ở lớp platform vì caller ngoài Google Cloud chưa có Google ID token; endpoint media bắt buộc shared secret qua `X-Renderer-Token`, còn health không nhận dữ liệu user.
+- Bucket GCS bật uniform access và public access prevention. Runtime service account đọc media staging; quyền tạo/cập nhật/xóa object được giới hạn bằng IAM condition dưới `output/`.
+- Concurrency và autoscale đều khóa ở 1 cho canary; `/tmp` của Cloud Run dùng memory nên cấu hình này chưa đại diện production capacity.
+- Studio chưa được nối vào renderer khi provider còn mock, vì renderer cố ý từ chối `mock://`.
+
 ## 6. Media boundaries
 
 ### 6.1. Scene media tại baseline 2.3
@@ -187,7 +196,8 @@ Implementation 2.4A hiện tại:
 | Final-render strict Range/MIME | Gate local PASS; production đã publish |
 | Upload magic bytes, bounded request, exact-key compensation | Gate local PASS; production đã publish |
 | Cumulative upload quota | Hoãn; không thuộc 2.4A |
-| Cloud Run/GCS staging, real Veo E2E | Chưa triển khai production |
+| Cloud Run/GCS renderer staging | Deploy + canary PASS Checkpoint 2.4B |
+| Real Veo E2E và Worker-to-renderer wiring | Chưa triển khai |
 | Production queue, observability, lifecycle | Chưa triển khai |
 
 ## 10. Quy tắc khi thay đổi kiến trúc

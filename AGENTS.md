@@ -95,12 +95,13 @@ Chi tiết conventions cho từng layer → xem `CONVENTIONS.md`.
 
 ## 7. Trạng thái hiện tại
 
-**Đã hoàn thành (MVP + Gate local 2.4A):** Studio UI · quản lý project · prompt compiler · Story Bible + storyboard 4 cảnh · pipeline tạo cảnh tuần tự · manual QC + khóa frame nối cảnh + private scene playback · D1/R2 + kiểm tra quyền sở hữu dữ liệu · credit ledger append-only · mock Veo + adapter Vertex AI Veo thật · MP4 mẫu phát được · renderer FFmpeg + API contract cho Cloud Run · strict private scene/final-render media · bounded asset upload + magic-byte validation + exact-key R2 compensation · CI cơ bản. Lint, production build, 180 test/subtest và kiểm tra renderer đều PASS tại Gate local Checkpoint 2.4A ngày 2026-07-18.
+**Đã hoàn thành (MVP + 2.4A + renderer staging 2.4B):** Studio UI · quản lý project · prompt compiler · Story Bible + storyboard 4 cảnh · pipeline tạo cảnh tuần tự · manual QC + khóa frame nối cảnh + private scene playback · D1/R2 + kiểm tra quyền sở hữu dữ liệu · credit ledger append-only · mock Veo + adapter Vertex AI Veo thật · MP4 mẫu phát được · renderer FFmpeg + API contract cho Cloud Run · strict private scene/final-render media · bounded asset upload + magic-byte validation + exact-key R2 compensation · CI cơ bản. Production Sites 2.4A đã publish. Cloud Run/GCS staging 2.4B đã deploy tại `us-central1`, renderer canary thật đã PASS cho render 4 clip, extraction v2 replay/conflict, private GCS và byte range. Lint, production build, **182/182** test/subtest và kiểm tra renderer đều PASS ngày 2026-07-19.
 
 **Còn thiếu trước production — không coi các mục này là "đã ổn":**
-- Triển khai renderer FFmpeg lên Cloud Run thật
-- Cấu hình Google Cloud, GCS, quyền service account
 - Test end-to-end với Veo thật (hiện chỉ có mock)
+- Nối Worker/Sites production với renderer và media GCS thật; không bật `RENDER_SERVICE_*` khi scene source còn là `mock://`
+- Cloud Run staging hiện cho phép platform-level unauthenticated invocation để caller ngoài Google Cloud dùng `X-Renderer-Token`; private IAM/WIF chưa triển khai
+- Final render chưa có durable idempotent replay khi mất response sau upload; production retry/queue phải xử lý trước khi mở tải thật
 - Hoàn tất trust-boundary verification trên deployment 2.4A: owner/non-owner, logout/session-expiry và direct-origin reachability; unauthenticated/header-spoof edge probes đã PASS
 - Hàng đợi production: rate limit, retry, dead-letter queue
 - Theo dõi chi phí, log, metric, cảnh báo

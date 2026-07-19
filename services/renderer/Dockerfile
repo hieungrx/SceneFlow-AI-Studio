@@ -1,4 +1,4 @@
-FROM node:20-bookworm-slim
+FROM node:22-bookworm-slim
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates dumb-init ffmpeg \
@@ -6,7 +6,7 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY --chown=node:node package.json server.mjs ./
+COPY --chown=node:node package.json server.mjs extraction-operation.mjs ./
 
 ENV NODE_ENV=production \
     PORT=8080
