@@ -35,6 +35,15 @@ test("presents deterministic planning and the actual selected scene model truthf
   assert.match(sceneCard, /generationModeLabel/);
   assert.match(sceneCard, /riskFactors/);
   assert.match(sceneCard, /modelLabel\(activeJob\.model\)/);
+  assert.match(dashboard, /Story Bible cụ thể/);
+  assert.match(dashboard, /chưa được bind vào Veo/);
+  assert.match(dashboard, /method: "PATCH"/);
+  assert.match(sceneCard, /Đã lập kế hoạch nhận dạng/);
+
+  const combined = `${dashboard}\n${sceneCard}`;
+  assert.doesNotMatch(combined, /Identity locked/i);
+  assert.doesNotMatch(combined, /Reference locked/i);
+  assert.doesNotMatch(combined, /Product locked/i);
 });
 
 test("removes the disposable starter preview", () => {

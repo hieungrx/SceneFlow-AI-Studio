@@ -7,6 +7,7 @@ import type {
   PromptVersion,
   Project,
   Scene,
+  StoryBible,
   StoryboardVersion,
   StoryboardVersionDraft,
 } from "./types";
@@ -121,7 +122,7 @@ export function transitionSceneFromStatusForJobClaim(
 }
 
 export function createProject(
-  input: Pick<Project, "name" | "brief" | "template" | "aspectRatio" | "targetDurationSeconds" | "model">,
+  input: Pick<Project, "name" | "brief" | "template" | "aspectRatio" | "targetDurationSeconds" | "model" | "storyBible">,
   ownerId = "demo-user",
 ): Project {
   const createdAt = new Date().toISOString();
@@ -130,20 +131,28 @@ export function createProject(
     ownerId,
     ...input,
     status: "draft",
-    storyBible: {
-      characterLock: "Chưa khóa nhân vật",
-      productLock: "Giữ đúng thiết kế, màu sắc và tỷ lệ sản phẩm từ ảnh tải lên.",
-      environmentLock: "Dùng cùng một bối cảnh trong các cảnh liên tục.",
-      lightingLock: "Giữ nguyên hướng sáng giữa các cảnh.",
-      visualStyle: "Photorealistic cinematic commercial.",
-      audioDirection: "Voice-over và nhạc nền được trộn trên timeline chung.",
-      mustAvoid: ["product deformation", "identity drift", "unreadable text"],
-    },
+    storyBible: cloneStoryBible(input.storyBible),
     createdAt,
     updatedAt: createdAt,
   };
   projects.set(project.id, project);
   return project;
+}
+
+export function updateProjectStoryBible(
+  projectId: string,
+  ownerId: string,
+  storyBible: StoryBible,
+): Project | null {
+  const project = projects.get(projectId);
+  if (!project || project.ownerId !== ownerId || hasExecutionHistory(projectId)) return null;
+  const updated = {
+    ...project,
+    storyBible: cloneStoryBible(storyBible),
+    updatedAt: new Date().toISOString(),
+  };
+  projects.set(projectId, updated);
+  return updated;
 }
 
 export function saveScenes(projectId: string, nextScenes: Scene[]): Scene[] {
@@ -569,4 +578,8 @@ function resolveSubmissionScene(scene: Scene): Scene {
   if (!scene.dependsOnSceneId) return scene;
   const previous = scenes.get(scene.dependsOnSceneId);
   return previous?.endFrameUri ? { ...scene, startFrameUri: previous.endFrameUri } : scene;
+}
+
+function cloneStoryBible(value: StoryBible): StoryBible {
+  return { ...value, mustAvoid: [...value.mustAvoid] };
 }

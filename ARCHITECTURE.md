@@ -98,7 +98,7 @@ sequenceDiagram
 | --- | --- | --- |
 | `app/` | Studio UI và route handlers | Auth trước khi đọc/ghi dữ liệu owner; validate request; response có named key |
 | `lib/repository.ts` | Business query và ownership | Cổng duy nhất truy cập D1 cho business logic |
-| `lib/storyboard-planner.ts`, `lib/prompt-compiler.ts` | Planning và prompt compilation | Deterministic, versioned, provider-neutral contract; mode-aware prompt output |
+| `lib/story-bible.ts`, `lib/storyboard-planner.ts`, `lib/prompt-compiler.ts` | Product truth, planning và prompt compilation | Concrete validation; deterministic, versioned, provider-neutral contract; mode-aware prompt output |
 | `db/`, `drizzle/` | Schema và migration | D1/Drizzle; JSON text column dùng suffix `_json` |
 | `lib/veo-provider.ts` | Adapter video provider | Mock/Google được chọn qua factory; UI và route không chứa logic provider-specific |
 | `lib/renderer-client.ts`, `services/renderer/` | Contract ghép video | Renderer độc lập với provider và ứng dụng chính |
@@ -112,21 +112,22 @@ Không viết Drizzle query ngoài repository layer, không đưa binding Cloudf
 
 ### 5.1. Tạo và duyệt cảnh
 
-1. User đã xác thực tạo project; repository gắn owner phía server.
-2. Deterministic planner kết hợp brief với Story Bible snapshot để tạo bốn `SceneContract` có version.
-3. Mode-aware compiler tạo prompt theo `text_to_video`, `first_frame`, `first_last_frame` hoặc `reference_guided`; 2.5A chỉ lập scene thật bằng hai mode đầu và không bind reference/keyframe.
-4. Storyboard version cùng authoritative contracts được ghi vào `storyboards.compiled_json`; prompt của từng scene được ghi vào `prompt_versions` kèm compiler version.
-5. `scenes` được thay bằng active projection liên kết qua `storyboard_id`; bốn scene vẫn giữ dependency chain hiện tại.
-6. Generation kiểm tra dependency và credit trước khi submit provider.
-7. Chỉ một cảnh đủ điều kiện được chạy; pipeline dừng khi generation đang chạy hoặc chờ manual QC.
-8. Cảnh được duyệt phải có video output và continuity frame hợp lệ.
-9. Frame cuối trở thành anchor cho cảnh kế tiếp.
-10. Regenerate cảnh trước sẽ vô hiệu hóa các cảnh downstream thuộc cùng owner.
+1. User đã xác thực tạo project và nhập bảy trường Story Bible cụ thể; API/repository gắn owner phía server. Project draft có thể PATCH Story Bible khi chưa có execution history.
+2. API và planner cùng từ chối field rỗng, generic placeholder hoặc claim về reference chưa bind. Không có default Story Bible chung cho project mới.
+3. Deterministic planner kết hợp brief với đúng Story Bible snapshot để tạo bốn `SceneContract` có version, mỗi contract giữ `visualStyle` và `audioDirection`.
+4. Mode-aware compiler tạo prompt theo `text_to_video`, `first_frame`, `first_last_frame` hoặc `reference_guided`; style/audio được bảo toàn theo policy của mode. 2.5A chỉ lập scene thật bằng hai mode đầu và không bind reference/keyframe.
+5. Storyboard version cùng authoritative contracts được ghi vào `storyboards.compiled_json`; exact positive/negative compilation của từng scene được ghi vào `prompt_versions.assumptions_json` cùng mode, compiler version, provider target và compiler config.
+6. `scenes` được thay bằng active projection liên kết qua `storyboard_id`; bốn scene vẫn giữ dependency chain hiện tại.
+7. Generation kiểm tra dependency và credit trước khi submit provider.
+8. Chỉ một cảnh đủ điều kiện được chạy; pipeline dừng khi generation đang chạy hoặc chờ manual QC.
+9. Cảnh được duyệt phải có video output và continuity frame hợp lệ.
+10. Frame cuối trở thành anchor cho cảnh kế tiếp.
+11. Regenerate cảnh trước sẽ vô hiệu hóa các cảnh downstream thuộc cùng owner.
 
 ### 5.2. Versioning và active projection trong 2.5A
 
 - Mỗi POST storyboard tạo ID/version mới; compiled JSON cũ không bị ghi đè.
-- Prompt version dùng scene ID mới của version đó và giữ compiler version trong metadata JSON của row hiện có.
+- Prompt version dùng scene ID mới của version đó và giữ toàn bộ compiled payload trong metadata JSON của row hiện có; exact negative prompt không phụ thuộc active scene projection.
 - Một D1 batch đổi storyboard `active` cũ thành `superseded`, tạo version mới, thay active scene projection, ghi prompt rows và cập nhật project.
 - Replan có approved scene cần xác nhận rõ. Replan bị chặn nếu project đã có job/render history vì schema hiện chưa bind các operation cũ tới immutable scene version; đây là fail-closed để tránh orphan hoặc version drift.
 - GET storyboard history luôn đi qua project ownership; client không cung cấp owner ID.
@@ -202,7 +203,8 @@ Implementation 2.4A hiện tại:
 | Năng lực | Trạng thái |
 | --- | --- |
 | Studio, prompt compiler, Story Bible, storyboard | Hoàn tất MVP |
-| Versioned Scene Contracts, deterministic planner/compiler/lint | Hoàn tất local Checkpoint 2.5A |
+| Concrete Story Bible input/update validation | Hoàn tất local Checkpoint 2.5A correction; chờ re-review |
+| Versioned Scene Contracts, deterministic planner/compiler/lint | Hoàn tất local Checkpoint 2.5A correction; chờ re-review |
 | Storyboard/prompt history trên schema hiện có | Hoàn tất local; không có migration |
 | Pipeline tuần tự, manual QC, continuity anchor | Hoàn tất Checkpoint 2.3 |
 | D1/R2, ownership, credit ledger | Hoàn tất nền tảng MVP |

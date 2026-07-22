@@ -30,6 +30,11 @@ test("compiles text-to-video with concrete visual truth", () => {
   assert.match(first.prompt, new RegExp(escapeRegExp(state.productState)));
   assert.match(first.prompt, new RegExp(escapeRegExp(state.environmentState)));
   assert.match(first.prompt, new RegExp(escapeRegExp(state.lightingState)));
+  assert.match(first.prompt, /Visual style: Photorealistic warm cinematic commercial/i);
+  assert.match(first.prompt, /Audio direction: Natural coffee shop room tone without dialogue/i);
+  assert.equal(first.targetProvider, "google_veo");
+  assert.equal(first.compilerConfig.visualStylePolicy, "explicit");
+  assert.equal(first.compilerConfig.audioDirectionPolicy, "explicit");
 });
 
 test("compiles first-frame as motion-focused guidance", () => {
@@ -37,6 +42,12 @@ test("compiles first-frame as motion-focused guidance", () => {
   assert.match(compilation.prompt, /supplied first frame as the authoritative visual state/i);
   assert.match(compilation.prompt, /Primary action:/);
   assert.doesNotMatch(compilation.prompt, new RegExp(escapeRegExp(state.productState)));
+  assert.match(compilation.prompt, /Visual style continuity:/i);
+  assert.match(compilation.prompt, /Natural coffee shop room tone without dialogue/i);
+  assert.doesNotMatch(
+    compilation.prompt,
+    /Photorealistic warm cinematic commercial with shallow depth of field/i,
+  );
   assert.equal(compilation.lintIssues.some((issue) => issue.code === "redundant_image_prompt"), false);
 });
 
@@ -51,12 +62,14 @@ test("compiles first-last-frame as a controlled boundary transition", () => {
   assert.match(compilation.prompt, /supplied first and last frames/i);
   assert.match(compilation.prompt, /Required boundary changes:/);
   assert.match(compilation.prompt, /Arrive at the supplied last frame smoothly/i);
+  assert.match(compilation.prompt, /Natural coffee shop room tone without dialogue/i);
 });
 
 test("compiles reference-guided without claiming or binding real references", () => {
   const compilation = compileScenePrompt(sceneContract("reference_guided"));
   assert.match(compilation.prompt, /bound reference inputs as the authority/i);
   assert.match(compilation.prompt, /without restating the reference content/i);
+  assert.match(compilation.prompt, /Natural coffee shop room tone without dialogue/i);
   assert.doesNotMatch(compilation.prompt, /gs:\/\//i);
 });
 
@@ -96,7 +109,7 @@ test("flags an image prompt that redundantly repeats all static state", () => {
 
 function sceneContract(generationMode) {
   return {
-    version: 1,
+    version: 2,
     sceneId: "scene_contract_test",
     sceneIndex: 1,
     goal: "Show the product truth in one controlled shot.",
@@ -107,6 +120,8 @@ function sceneContract(generationMode) {
     cameraMotion: "slow dolly in",
     environmentMotion: "Only subtle continuous steam moves in the background.",
     backgroundPolicy: "controlled_motion",
+    visualStyle: "Photorealistic warm cinematic commercial with shallow depth of field.",
+    audioDirection: "Natural coffee shop room tone without dialogue.",
     continuityLocks: [
       `Character: ${state.subjectState}`,
       `Product: ${state.productState}`,

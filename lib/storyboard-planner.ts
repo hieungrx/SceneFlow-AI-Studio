@@ -3,9 +3,10 @@ import type {
   SceneContract,
   StructuredVisualState,
 } from "./types";
+import { assertConcreteStoryBible } from "./story-bible.ts";
 
-export const STORYBOARD_PLANNER_VERSION = "deterministic-storyboard-v1";
-export const SCENE_CONTRACT_VERSION = 1;
+export const STORYBOARD_PLANNER_VERSION = "deterministic-storyboard-v2";
+export const SCENE_CONTRACT_VERSION = 2;
 
 export type PlannedScene = {
   title: string;
@@ -85,6 +86,7 @@ export function planDeterministicStoryboard(
   project: Project,
   options: PlannerOptions = {},
 ): PlannedScene[] {
+  assertConcreteStoryBible(project.storyBible);
   const createSceneId = options.createSceneId ?? (() => `scene_${crypto.randomUUID()}`);
   const continuityLocks = buildContinuityLocks(project);
   const riskFactors = detectRiskFactors(project.brief);
@@ -116,6 +118,8 @@ export function planDeterministicStoryboard(
       cameraMotion: blueprint.cameraMotion,
       environmentMotion: blueprint.environmentMotion,
       backgroundPolicy: blueprint.backgroundPolicy,
+      visualStyle: project.storyBible.visualStyle,
+      audioDirection: project.storyBible.audioDirection,
       continuityLocks,
       negativeConstraints: [...project.storyBible.mustAvoid],
       generationMode: sceneIndex === 1 ? "text_to_video" : "first_frame",

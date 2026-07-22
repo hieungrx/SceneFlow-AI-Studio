@@ -603,6 +603,38 @@ textarea {
   resize: vertical;
 }
 
+.story-bible-editor {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #e8e1fb;
+  border-radius: 11px;
+  background: #faf8fd;
+}
+
+.story-bible-editor legend {
+  padding: 0 5px;
+  color: #4b405f;
+  font-size: 10px;
+  font-weight: 850;
+}
+
+.story-bible-editor > small,
+.story-bible-editor > button {
+  grid-column: 1 / -1;
+}
+
+.story-bible-editor > small {
+  color: #766f80;
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.story-bible-editor textarea {
+  min-height: 66px;
+}
+
 input:hover,
 textarea:hover,
 select:hover,
@@ -1551,6 +1583,7 @@ textarea::placeholder {
   .storyboard-panel { padding: 14px; }
 
   .upload-strip,
+  .story-bible-editor,
   .form-row,
   .form-row.three { grid-template-columns: 1fr; }
   .storyboard-actions { display: none; }

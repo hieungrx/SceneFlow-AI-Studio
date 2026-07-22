@@ -13,6 +13,7 @@ import {
   users as usersTable,
 } from "../db/schema";
 import * as memory from "./mock-store";
+import { LEGACY_UNSET_STORY_BIBLE } from "./story-bible";
 import type {
   GenerationActivationInput,
   GenerationFailureInput,
@@ -39,20 +40,10 @@ import type {
 type Db = ReturnType<typeof getDb>;
 type ProjectInput = Pick<
   Project,
-  "name" | "brief" | "template" | "aspectRatio" | "targetDurationSeconds" | "model"
+  "name" | "brief" | "template" | "aspectRatio" | "targetDurationSeconds" | "model" | "storyBible"
 >;
 
 const EXTRACTION_CLAIM_TOKEN_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
-
-const DEFAULT_STORY_BIBLE: StoryBible = {
-  characterLock: "Giữ nguyên khuôn mặt, tóc, vóc dáng và trang phục từ ảnh tham chiếu.",
-  productLock: "Giữ đúng thiết kế, màu sắc, nhãn và tỷ lệ sản phẩm.",
-  environmentLock: "Dùng cùng một không gian trong các cảnh liên tục.",
-  lightingLock: "Giữ nguyên hướng sáng, nhiệt độ màu và thời điểm trong ngày.",
-  visualStyle: "Photorealistic cinematic commercial, natural motion, realistic textures.",
-  audioDirection: "Một nền âm thanh xuyên suốt; lời thoại chỉ xuất hiện khi người dùng yêu cầu.",
-  mustAvoid: ["identity drift", "product deformation", "duplicated objects", "unreadable text"],
-};
 
 async function withMemoryFallback<T>(
   primary: (db: Db) => Promise<T>,
@@ -137,7 +128,7 @@ export async function createOwnedProject(ownerId: string, input: ProjectInput): 
     ownerId,
     ...input,
     status: "draft",
-    storyBible: DEFAULT_STORY_BIBLE,
+    storyBible: cloneStoryBible(input.storyBible),
     createdAt,
     updatedAt: createdAt,
   };
@@ -161,6 +152,38 @@ export async function createOwnedProject(ownerId: string, input: ProjectInput): 
       return project;
     },
     () => memory.createProject(input, ownerId),
+  );
+}
+
+export async function updateOwnedProjectStoryBible(
+  ownerId: string,
+  projectId: string,
+  storyBible: StoryBible,
+): Promise<Project | null> {
+  const updatedAt = new Date().toISOString();
+  return withMemoryFallback(
+    async (db) => {
+      const result = await db.$client.prepare(`
+        UPDATE projects
+        SET story_bible_json = ?, updated_at = ?
+        WHERE id = ?
+          AND owner_id = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM generation_jobs WHERE generation_jobs.project_id = projects.id
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM final_renders WHERE final_renders.project_id = projects.id
+          )
+      `).bind(JSON.stringify(storyBible), updatedAt, projectId, ownerId).run();
+      if (Number(result.meta.changes) !== 1) return null;
+      const [row] = await db
+        .select()
+        .from(projectsTable)
+        .where(and(eq(projectsTable.id, projectId), eq(projectsTable.ownerId, ownerId)))
+        .limit(1);
+      return row ? projectFromRow(row) : null;
+    },
+    () => memory.updateProjectStoryBible(projectId, ownerId, storyBible),
   );
 }
 
@@ -364,6 +387,10 @@ export async function createOwnedStoryboardVersion(
             assumptions: promptVersion.assumptions,
             compilerVersion: promptVersion.compilerVersion,
             generationMode: promptVersion.generationMode,
+            targetProvider: promptVersion.targetProvider,
+            negativePrompt: promptVersion.negativePrompt,
+            compilerConfig: promptVersion.compilerConfig,
+            compiledPayload: promptVersion.compiledPayload,
             lintIssues: promptVersion.lintIssues,
           }),
           promptVersion.accepted ? 1 : 0,
@@ -1740,7 +1767,7 @@ function storyboardFromRow(row: typeof storyboardsTable.$inferSelect): Storyboar
 }
 
 function promptVersionFromRow(row: typeof promptVersionsTable.$inferSelect): PromptVersion {
-  const metadata = parsePromptVersionMetadata(row.assumptionsJson);
+  const metadata = parsePromptVersionMetadata(row.assumptionsJson, row.optimizedPrompt);
   return {
     id: row.id,
     projectId: row.projectId,
@@ -1748,9 +1775,13 @@ function promptVersionFromRow(row: typeof promptVersionsTable.$inferSelect): Pro
     version: row.version,
     rawPrompt: row.rawPrompt,
     optimizedPrompt: row.optimizedPrompt,
+    negativePrompt: metadata.negativePrompt,
     assumptions: metadata.assumptions,
     compilerVersion: metadata.compilerVersion,
     generationMode: metadata.generationMode,
+    targetProvider: metadata.targetProvider,
+    compilerConfig: metadata.compilerConfig,
+    compiledPayload: metadata.compiledPayload,
     lintIssues: metadata.lintIssues,
     accepted: row.accepted,
     createdAt: row.createdAt,
@@ -1819,6 +1850,8 @@ function legacySceneContractFromRow(row: typeof scenesTable.$inferSelect): Scene
     cameraMotion: "legacy unspecified camera motion",
     environmentMotion: "legacy unspecified environment motion",
     backgroundPolicy: "controlled_motion",
+    visualStyle: "Legacy scene did not persist a visual style direction.",
+    audioDirection: "Legacy scene did not persist an audio direction.",
     continuityLocks: [row.startState, row.endState].filter(Boolean),
     negativeConstraints: row.negativePrompt.split(",").map((value) => value.trim()).filter(Boolean),
     generationMode: row.sceneIndex === 1 ? "text_to_video" : "first_frame",
@@ -1837,7 +1870,20 @@ function parseStoryboardCompilation(value: string): StoryboardCompilation {
       parsed.storyBible &&
       Array.isArray(parsed.sceneContracts)
     ) {
-      return parsed as StoryboardCompilation;
+      const storyBible = normalizeStoryBible(parsed.storyBible);
+      return {
+        ...(parsed as StoryboardCompilation),
+        storyBible,
+        sceneContracts: parsed.sceneContracts.map((contract) => ({
+          ...contract,
+          visualStyle: typeof contract.visualStyle === "string"
+            ? contract.visualStyle
+            : storyBible.visualStyle,
+          audioDirection: typeof contract.audioDirection === "string"
+            ? contract.audioDirection
+            : storyBible.audioDirection,
+        })),
+      };
     }
   } catch {
     // Fall through to a safe legacy representation.
@@ -1845,15 +1891,19 @@ function parseStoryboardCompilation(value: string): StoryboardCompilation {
   return {
     schemaVersion: 1,
     planner: { kind: "deterministic_rules", version: "legacy-unstructured" },
-    storyBible: DEFAULT_STORY_BIBLE,
+    storyBible: LEGACY_UNSET_STORY_BIBLE,
     sceneContracts: [],
   };
 }
 
-function parsePromptVersionMetadata(value: string): {
+function parsePromptVersionMetadata(value: string, positivePrompt: string): {
   assumptions: string[];
   compilerVersion: string;
   generationMode: PromptVersion["generationMode"];
+  negativePrompt: string;
+  targetProvider: PromptVersion["targetProvider"];
+  compilerConfig: PromptVersion["compilerConfig"];
+  compiledPayload: PromptVersion["compiledPayload"];
   lintIssues: PromptLintIssue[];
 } {
   try {
@@ -1863,31 +1913,172 @@ function parsePromptVersionMetadata(value: string): {
         assumptions: parsed.filter((item): item is string => typeof item === "string"),
         compilerVersion: "legacy-unversioned",
         generationMode: "text_to_video",
+        negativePrompt: "",
+        targetProvider: "google_veo",
+        compilerConfig: legacyCompilerConfig("text_to_video", "google_veo"),
+        compiledPayload: legacyCompiledPayload(positivePrompt, "", "text_to_video", "google_veo"),
         lintIssues: [],
       };
     }
+    const generationMode = isGenerationMode(parsed.generationMode)
+      ? parsed.generationMode
+      : "text_to_video";
+    const targetProvider = isPromptTargetProvider(parsed.targetProvider)
+      ? parsed.targetProvider
+      : "google_veo";
+    const compilerVersion = typeof parsed.compilerVersion === "string"
+      ? parsed.compilerVersion
+      : "legacy-unversioned";
+    const negativePrompt = typeof parsed.negativePrompt === "string" ? parsed.negativePrompt : "";
+    const compilerConfig = parseCompilerConfig(parsed.compilerConfig, generationMode, targetProvider);
+    const lintIssues = Array.isArray(parsed.lintIssues)
+      ? parsed.lintIssues.filter(isPromptLintIssue)
+      : [];
     return {
       assumptions: Array.isArray(parsed.assumptions)
         ? parsed.assumptions.filter((item): item is string => typeof item === "string")
         : [],
-      compilerVersion: typeof parsed.compilerVersion === "string"
-        ? parsed.compilerVersion
-        : "legacy-unversioned",
-      generationMode: isGenerationMode(parsed.generationMode)
-        ? parsed.generationMode
-        : "text_to_video",
-      lintIssues: Array.isArray(parsed.lintIssues)
-        ? parsed.lintIssues.filter(isPromptLintIssue)
-        : [],
+      compilerVersion,
+      generationMode,
+      negativePrompt,
+      targetProvider,
+      compilerConfig,
+      compiledPayload: parseCompiledPayload(
+        parsed.compiledPayload,
+        generationMode,
+        targetProvider,
+        compilerVersion,
+        compilerConfig,
+        negativePrompt,
+        lintIssues,
+        positivePrompt,
+      ),
+      lintIssues,
     };
   } catch {
     return {
       assumptions: [],
       compilerVersion: "legacy-unversioned",
       generationMode: "text_to_video",
+      negativePrompt: "",
+      targetProvider: "google_veo",
+      compilerConfig: legacyCompilerConfig("text_to_video", "google_veo"),
+      compiledPayload: legacyCompiledPayload(positivePrompt, "", "text_to_video", "google_veo"),
       lintIssues: [],
     };
   }
+}
+
+function parseCompiledPayload(
+  value: unknown,
+  generationMode: PromptVersion["generationMode"],
+  targetProvider: PromptVersion["targetProvider"],
+  compilerVersion: string,
+  compilerConfig: PromptVersion["compilerConfig"],
+  negativePrompt: string,
+  lintIssues: PromptLintIssue[],
+  positivePrompt: string,
+): PromptVersion["compiledPayload"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return legacyCompiledPayload(
+      positivePrompt,
+      negativePrompt,
+      generationMode,
+      targetProvider,
+      compilerVersion,
+      compilerConfig,
+      lintIssues,
+    );
+  }
+  const parsed = value as Record<string, unknown>;
+  if (
+    parsed.deterministic !== true ||
+    typeof parsed.prompt !== "string" ||
+    typeof parsed.negativePrompt !== "string" ||
+    typeof parsed.compilerVersion !== "string" ||
+    !isGenerationMode(parsed.generationMode) ||
+    !isPromptTargetProvider(parsed.targetProvider)
+  ) {
+    return legacyCompiledPayload(
+      positivePrompt,
+      negativePrompt,
+      generationMode,
+      targetProvider,
+      compilerVersion,
+      compilerConfig,
+      lintIssues,
+    );
+  }
+  return {
+    compilerVersion: parsed.compilerVersion,
+    deterministic: true,
+    generationMode: parsed.generationMode,
+    targetProvider: parsed.targetProvider,
+    compilerConfig: parseCompilerConfig(
+      parsed.compilerConfig,
+      parsed.generationMode,
+      parsed.targetProvider,
+    ),
+    prompt: parsed.prompt,
+    negativePrompt: parsed.negativePrompt,
+    lintIssues: Array.isArray(parsed.lintIssues)
+      ? parsed.lintIssues.filter(isPromptLintIssue)
+      : [],
+  };
+}
+
+function legacyCompiledPayload(
+  positivePrompt: string,
+  negativePrompt: string,
+  generationMode: PromptVersion["generationMode"],
+  targetProvider: PromptVersion["targetProvider"],
+  compilerVersion = "legacy-unversioned",
+  compilerConfig = legacyCompilerConfig(generationMode, targetProvider),
+  lintIssues: PromptLintIssue[] = [],
+): PromptVersion["compiledPayload"] {
+  return {
+    compilerVersion,
+    deterministic: true,
+    generationMode,
+    targetProvider,
+    compilerConfig,
+    prompt: positivePrompt,
+    negativePrompt,
+    lintIssues,
+  };
+}
+
+function parseCompilerConfig(
+  value: unknown,
+  generationMode: PromptVersion["generationMode"],
+  targetProvider: PromptVersion["targetProvider"],
+): PromptVersion["compilerConfig"] {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const parsed = value as Record<string, unknown>;
+    if (
+      (parsed.negativePromptFormat === "comma_separated" || parsed.negativePromptFormat === "avoid_pipe") &&
+      (parsed.visualStylePolicy === "explicit" || parsed.visualStylePolicy === "continuity") &&
+      parsed.audioDirectionPolicy === "explicit"
+    ) {
+      return {
+        negativePromptFormat: parsed.negativePromptFormat,
+        visualStylePolicy: parsed.visualStylePolicy,
+        audioDirectionPolicy: "explicit",
+      };
+    }
+  }
+  return legacyCompilerConfig(generationMode, targetProvider);
+}
+
+function legacyCompilerConfig(
+  generationMode: PromptVersion["generationMode"],
+  targetProvider: PromptVersion["targetProvider"],
+): PromptVersion["compilerConfig"] {
+  return {
+    negativePromptFormat: targetProvider === "google_veo" ? "comma_separated" : "avoid_pipe",
+    visualStylePolicy: generationMode === "text_to_video" ? "explicit" : "continuity",
+    audioDirectionPolicy: "explicit",
+  };
 }
 
 function isGenerationMode(value: unknown): value is PromptVersion["generationMode"] {
@@ -1895,6 +2086,10 @@ function isGenerationMode(value: unknown): value is PromptVersion["generationMod
     value === "first_frame" ||
     value === "first_last_frame" ||
     value === "reference_guided";
+}
+
+function isPromptTargetProvider(value: unknown): value is PromptVersion["targetProvider"] {
+  return value === "google_veo" || value === "mock";
 }
 
 function isPromptLintIssue(value: unknown): value is PromptLintIssue {
@@ -1951,8 +2146,22 @@ function generationJobFromProcessingState(job: GenerationJobProcessingState): Ge
 
 function parseStoryBible(value: string): StoryBible {
   try {
-    return { ...DEFAULT_STORY_BIBLE, ...(JSON.parse(value) as Partial<StoryBible>) };
+    return normalizeStoryBible(JSON.parse(value) as Partial<StoryBible>);
   } catch {
-    return DEFAULT_STORY_BIBLE;
+    return cloneStoryBible(LEGACY_UNSET_STORY_BIBLE);
   }
+}
+
+function normalizeStoryBible(value: Partial<StoryBible>): StoryBible {
+  return {
+    ...LEGACY_UNSET_STORY_BIBLE,
+    ...value,
+    mustAvoid: Array.isArray(value.mustAvoid)
+      ? value.mustAvoid.filter((item): item is string => typeof item === "string")
+      : [...LEGACY_UNSET_STORY_BIBLE.mustAvoid],
+  };
+}
+
+function cloneStoryBible(value: StoryBible): StoryBible {
+  return { ...value, mustAvoid: [...value.mustAvoid] };
 }

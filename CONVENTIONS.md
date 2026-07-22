@@ -38,6 +38,7 @@ Không dùng auto-increment integer, không dùng UUID thô không có prefix. C
 
 - Tất cả shared types nằm trong `lib/types.ts`
 - Planning dùng `SceneContract` provider-neutral và serializable; không đưa GCS/R2 URI hoặc provider payload shape vào contract ở 2.5A
+- `SceneContract` phải giữ `visualStyle` và `audioDirection` từ đúng Story Bible snapshot; không suy ra hai direction này từ provider hoặc asset URI
 - Dùng union literal cho status: `"draft" | "planning" | "generating" | ...`
 - Dùng `as const` cho static readonly arrays/tuples
 - Ưu tiên `Pick<>`, `Omit<>`, `Partial<>` thay vì duplicate type shape
@@ -84,7 +85,7 @@ db.select({ bible: sql`json(story_bible_json)` })
 ### Planning versioning
 
 - `storyboards.compiled_json` là nguồn authoritative cho Story Bible snapshot và Scene Contracts của từng version.
-- `prompt_versions.assumptions_json` giữ metadata mở rộng (`assumptions`, `compilerVersion`, `generationMode`, `lintIssues`) qua converter; không parse JSON trong route.
+- `prompt_versions.assumptions_json` giữ metadata và exact compiled payload (`assumptions`, positive/negative prompt, `compilerVersion`, `generationMode`, `targetProvider`, `compilerConfig`, `lintIssues`) qua converter; không parse JSON trong route.
 - `scenes` là active projection, bắt buộc gắn `storyboard_id` cho planning version mới. Không coi scene rows là lịch sử authoritative.
 - Replan tạo storyboard/scene IDs mới và giữ storyboard/prompt rows cũ. Không xóa projection nếu project đã có job/render history vì operation schema hiện chưa có immutable version binding.
 - Thay active projection và ghi version/prompt/project status phải dùng D1 batch atomic theo pattern hiện có.
@@ -132,6 +133,13 @@ function clampDuration(value: unknown): number {
 }
 ```
 
+### Story Bible validation
+
+- `POST /api/projects` và `PATCH /api/projects/:id` chỉ nhận Story Bible có đủ `characterLock`, `productLock`, `environmentLock`, `lightingLock`, `visualStyle`, `audioDirection` và danh sách `mustAvoid`.
+- Placeholder/generic lock và câu tuyên bố dựa trên ảnh/reference bị từ chối khi 2.5A chưa có reference binding.
+- Planner gọi lại validation trước khi tạo Scene Contracts; không coi route validation là trust boundary duy nhất.
+- Project đã có generation/render history không được cập nhật Story Bible trong 2.5A, cùng lý do provenance với replan fail-closed.
+
 ### Response Format
 
 - Wrap data trong named key — không trả raw object/array:
@@ -175,6 +183,7 @@ export interface VideoProvider {
 - Scene prompt đi qua `compileScenePrompt()` từ authoritative `SceneContract`.
 - Compiler phải dispatch rõ theo `text_to_video`, `first_frame`, `first_last_frame`, `reference_guided` và trả `compilerVersion` ổn định.
 - Text-to-video phải chứa concrete Story Bible truth. Image-guided modes tập trung vào motion/boundary và không lặp lại toàn bộ static state.
+- Text-to-video phải render visual style và audio direction. First-frame giữ style continuity và audio; first/last-frame và reference-guided vẫn phải giữ audio direction.
 - Negative constraint nằm provider-neutral trong contract; formatter tạo chuỗi theo target provider.
 - Prompt lint error chặn compile; warning được persist cùng prompt version. Không bỏ qua camera conflict, multiple primary action, stable-end hoặc continuity-lock checks.
 - Cùng contract, compiler version và target provider phải cho output deterministic.

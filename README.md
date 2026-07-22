@@ -7,7 +7,7 @@ Xưởng video tự động: biến một brief thành storyboard có continuity
 | Phase | Phạm vi | Trạng thái |
 | --- | --- | --- |
 | 01 | Studio UI, tạo dự án, đăng nhập ChatGPT | Hoàn tất MVP |
-| 02 | Story Bible, versioned Scene Contracts, deterministic storyboard/compiler | Hoàn tất local 2.5A |
+| 02 | Concrete Story Bible, versioned Scene Contracts, deterministic storyboard/compiler | Correction local PASS; chờ 2.5A re-review |
 | 03 | Job state + polling, phụ thuộc cảnh trước, manual QC + continuity | Hoàn tất MVP |
 | 04 | D1, R2, quyền sở hữu, credit ledger, Veo adapter | Hoàn tất nền tảng |
 | 05 | Render mock có MP4 xem trước; FFmpeg production | Mock hoàn tất, production cần hạ tầng |
@@ -35,7 +35,7 @@ flowchart LR
 
 Điểm quan trọng của continuity: cảnh `N + 1` không được gửi đi trước khi cảnh `N` đạt QC. Frame cuối của cảnh `N` trở thành frame mở đầu của cảnh kế tiếp; Story Bible tiếp tục khóa nhân vật, sản phẩm, bối cảnh, ánh sáng và phong cách.
 
-Checkpoint 2.5A dùng planner quy tắc xác định, không gọi LLM. Mỗi lần lập storyboard tạo một row/version mới trong `storyboards`; `compiled_json` giữ Story Bible snapshot và bốn authoritative Scene Contracts. Prompt từng scene được lưu trong `prompt_versions` cùng compiler version, còn `scenes` chỉ là projection bốn cảnh đang hoạt động. Project đã có job/render history không được replan trong 2.5A để tránh làm orphan các operation chưa có immutable version binding.
+Checkpoint 2.5A dùng planner quy tắc xác định, không gọi LLM. Project mới phải nhập Story Bible cụ thể gồm nhân vật, sản phẩm, bối cảnh, ánh sáng, visual style, audio direction và must-avoid; placeholder hoặc câu dựa trên reference chưa bind bị từ chối. Mỗi lần lập storyboard tạo một row/version mới trong `storyboards`; `compiled_json` giữ Story Bible snapshot và bốn authoritative Scene Contracts. Prompt history giữ exact positive/negative payload, generation mode, compiler version, provider target và compiler config trong schema `prompt_versions` hiện có; `scenes` chỉ là projection bốn cảnh đang hoạt động. Project đã có job/render history không được đổi Story Bible hoặc replan trong 2.5A để tránh làm orphan các operation chưa có immutable version binding.
 
 ## Veo 3.1 Lite
 
@@ -114,7 +114,8 @@ Model mapping:
 ## API chính
 
 - `POST /api/prompts/optimize` — deterministic brief preview, tách giả định và câu hỏi cần xác nhận; không phải AI planner.
-- `GET|POST /api/projects` — danh sách/tạo project thuộc người dùng.
+- `GET|POST /api/projects` — danh sách/tạo project thuộc người dùng; POST yêu cầu `storyBible` cụ thể với đủ bảy trường product truth.
+- `GET|PATCH /api/projects/:id` — lấy project/scene hoặc cập nhật Story Bible đã validate trước execution history; auth và ownership chạy phía server.
 - `POST /api/assets` — tải ảnh tham chiếu vào R2.
 - `GET /api/projects/:id/storyboard` — lấy storyboard và prompt-version history thuộc owner.
 - `POST /api/projects/:id/storyboard` — tạo storyboard version và active scene projection mới; body `{ "confirmApprovedReplacement": true }` bắt buộc khi projection hiện tại có scene approved.

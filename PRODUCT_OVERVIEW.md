@@ -23,8 +23,8 @@ Brief
 
 1. Người dùng nhập brief và tài liệu tham chiếu cho video.
 2. Hệ thống hiển thị deterministic brief preview; Checkpoint 2.5A chưa dùng LLM planner.
-3. Story Bible xác định nhân vật, sản phẩm, bối cảnh và phong cách chung.
-4. Deterministic planner tạo storyboard version gồm bốn structured Scene Contracts có quan hệ phụ thuộc; mode-aware compiler tạo prompt có version cho từng cảnh.
+3. Người dùng nhập Story Bible cụ thể cho nhân vật, sản phẩm, bối cảnh, ánh sáng, visual style, audio direction và must-avoid; generic lock/reference claim chưa bind bị từ chối.
+4. Deterministic planner tạo storyboard version gồm bốn structured Scene Contracts có quan hệ phụ thuộc; mode-aware compiler giữ style/audio và tạo full positive/negative prompt history cho từng cảnh.
 5. Video được tạo tuần tự theo từng cảnh; provider contract hỗ trợ 4, 6 hoặc 8 giây, còn storyboard MVP hiện dùng 8 giây.
 6. Người dùng duyệt hoặc từ chối từng cảnh tại bước QC.
 7. Frame cuối của cảnh trước được dùng làm điểm neo continuity cho cảnh sau.
@@ -43,7 +43,7 @@ Brief
 
 ## Trạng thái hiện tại
 
-Checkpoint 2.3 đã hoàn thành nền tảng MVP gồm Studio UI, Story Bible, storyboard bốn cảnh, pipeline tạo cảnh tuần tự, manual QC, continuity anchor, D1/R2, ownership checks, credit ledger, mock Veo, Google Veo adapter và renderer contract. Gate local 2.4A đã bổ sung strict final-render media, bounded asset ingestion, magic-byte validation, exact-key R2 compensation và tài liệu trust boundary cho managed SIWC. Checkpoint 2.5A đã thay planning generic bằng versioned Scene Contracts, deterministic planner/compiler/lint, authoritative storyboard/prompt history và active scene projection mà không đổi schema hoặc provider request.
+Checkpoint 2.3 đã hoàn thành nền tảng MVP gồm Studio UI, Story Bible, storyboard bốn cảnh, pipeline tạo cảnh tuần tự, manual QC, continuity anchor, D1/R2, ownership checks, credit ledger, mock Veo, Google Veo adapter và renderer contract. Gate local 2.4A đã bổ sung strict final-render media, bounded asset ingestion, magic-byte validation, exact-key R2 compensation và tài liệu trust boundary cho managed SIWC. Checkpoint 2.5A correction đã thay planning generic bằng concrete Story Bible validation, versioned Scene Contracts có style/audio, deterministic planner/compiler/lint, full authoritative storyboard/prompt history và active scene projection mà không đổi schema hoặc provider request; hiện đang chờ independent re-review.
 
 Chế độ local không đăng nhập hiện phù hợp để kiểm tra giao diện và workflow mock. Người dùng có thể dựng storyboard, mô phỏng tạo cảnh, duyệt QC và kiểm tra cơ chế khóa/mở cảnh kế tiếp. Việc ghép trong chế độ này mới dừng ở render plan và video mẫu, chưa tạo một video dài mới từ các cảnh.
 

@@ -173,10 +173,11 @@ Storyboard MVP trước đây tạo bốn beat generic trực tiếp trong API r
 
 ### Quyết định
 
-- Scene planning dùng `SceneContract` provider-neutral, serializable và có version. Contract chứa visual state đầu/cuối, một primary action, motion, background policy, continuity locks, generation mode, risk factors và stable-end requirement.
+- Scene planning dùng `SceneContract` provider-neutral, serializable và có version. Contract chứa visual state đầu/cuối, một primary action, motion, background policy, `visualStyle`, `audioDirection`, continuity locks, generation mode, risk factors và stable-end requirement.
+- Project mới phải nhận bảy trường Story Bible cụ thể qua API/UI. Create/PATCH và planner cùng từ chối generic placeholder hoặc claim về reference chưa bind; legacy project thiếu product truth phải được bổ sung trước khi plan.
 - Planner bốn cảnh trong 2.5A là deterministic rules, có version rõ ràng và không được mô tả là AI/LLM planner.
 - `storyboards.compiled_json` giữ Story Bible snapshot và bốn authoritative Scene Contracts. Mỗi lần lập lại tạo row/version mới; row cũ chỉ chuyển từ `active` sang `superseded`, không bị xóa hoặc ghi đè compiled JSON.
-- `prompt_versions` giữ raw/compiled prompt cho từng scene. `assumptions_json` chứa metadata mở rộng gồm compiler version, generation mode và lint issues; không cần thay đổi schema.
+- `prompt_versions` giữ raw/compiled prompt cho từng scene. `assumptions_json` chứa exact positive/negative compiled payload, compiler version, generation mode, target provider, compiler config và lint issues; không cần thay đổi schema.
 - `scenes` chỉ là active projection và liên kết tới authoritative version qua `storyboard_id`. Scene reads được enrich từ storyboard/prompt history; legacy rows nhận contract compatibility version `0`.
 - Replan có scene `approved` bắt buộc `confirmApprovedReplacement: true`. Nếu project đã có bất kỳ generation job hoặc final render history nào, 2.5A từ chối replan kể cả đã xác nhận để không xóa scene rows mà job/render cũ đang tham chiếu.
 - Provider request, renderer contract, credit ledger, manual QC, private media và extraction v2 không thay đổi trong checkpoint này.
@@ -187,6 +188,7 @@ Storyboard MVP trước đây tạo bốn beat generic trực tiếp trong API r
 - D1 batch cập nhật status, tạo version, thay projection, ghi prompt versions và cập nhật project như một đơn vị atomic; concurrent replans tuần tự hóa thành các version riêng và chỉ còn một projection active.
 - Lịch sử contract/prompt được giữ đầy đủ, nhưng 2.5A chưa có immutable scene candidate/attempt linkage. Vì vậy project đã thực thi generation/render không thể replan an toàn; khả năng này phải chờ data model provenance ở checkpoint sau.
 - First-frame compiler có mặt và Scene 2–4 khai báo mode tương ứng, nhưng reference binding, boundary keyframes và `lastFrameUri` vẫn chưa được triển khai.
+- `visualStyle` được render trực tiếp trong text-to-video và giữ như continuity direction ở image-guided modes; `audioDirection` được render trong cả bốn mode vì provider generation hiện bật audio.
 
 ### Không chọn
 

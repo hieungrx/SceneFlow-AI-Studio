@@ -18,6 +18,7 @@ import {
   planDeterministicStoryboard,
   STORYBOARD_PLANNER_VERSION,
 } from "../../../../../lib/storyboard-planner";
+import { validateConcreteStoryBible } from "../../../../../lib/story-bible";
 import type {
   PromptVersion,
   Scene,
@@ -32,6 +33,7 @@ export async function GET(_request: Request, { params }: Context) {
   const { id } = await params;
   const project = await getOwnedProject(user.email, id);
   if (!project) return NextResponse.json({ error: "project_not_found" }, { status: 404 });
+
   const [storyboards, promptVersions] = await Promise.all([
     listOwnedStoryboards(user.email, id),
     listOwnedPromptVersions(user.email, id),
@@ -48,6 +50,14 @@ export async function POST(request: Request, { params }: Context) {
   const { id } = await params;
   const project = await getOwnedProject(user.email, id);
   if (!project) return NextResponse.json({ error: "project_not_found" }, { status: 404 });
+
+  const storyBibleIssues = validateConcreteStoryBible(project.storyBible);
+  if (storyBibleIssues.length > 0) {
+    return NextResponse.json(
+      { error: "invalid_story_bible", issues: storyBibleIssues },
+      { status: 400 },
+    );
+  }
 
   const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
   const allowApprovedReplacement = body?.confirmApprovedReplacement === true;
@@ -90,12 +100,16 @@ export async function POST(request: Request, { params }: Context) {
       version: 1,
       rawPrompt: `${planned.contract.goal}\n${planned.contract.primaryAction}`,
       optimizedPrompt: compilation.prompt,
+      negativePrompt: compilation.negativePrompt,
       assumptions: [
         `Storyboard planned by ${STORYBOARD_PLANNER_VERSION}.`,
         "No LLM or paid provider call was used.",
       ],
       compilerVersion: compilation.compilerVersion,
       generationMode: compilation.generationMode,
+      targetProvider: compilation.targetProvider,
+      compilerConfig: compilation.compilerConfig,
+      compiledPayload: compilation,
       lintIssues: compilation.lintIssues,
       accepted: true,
       createdAt,

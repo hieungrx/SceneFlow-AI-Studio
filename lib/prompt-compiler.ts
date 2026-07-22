@@ -3,7 +3,9 @@ import type {
   GenerationMode,
   PromptCompilation,
   PromptLintIssue,
+  PromptTargetProvider,
   SceneContract,
+  ScenePromptCompilerConfig,
   ScenePromptCompilation,
   StructuredVisualState,
   VideoModel,
@@ -17,11 +19,11 @@ type CompileBriefPreviewInput = {
 };
 
 type CompileScenePromptOptions = {
-  targetProvider?: "google_veo" | "mock";
+  targetProvider?: PromptTargetProvider;
 };
 
 export const BRIEF_PREVIEW_COMPILER_VERSION = "deterministic-brief-preview-v1";
-export const SCENE_PROMPT_COMPILER_VERSION = "scene-contract-prompt-v1";
+export const SCENE_PROMPT_COMPILER_VERSION = "scene-contract-prompt-v2";
 
 const BASE_NEGATIVE_CONSTRAINTS = [
   "identity drift",
@@ -93,10 +95,13 @@ export function compileScenePrompt(
   const prompt = compilerForMode(contract.generationMode)(contract);
   const lintIssues = [...contractIssues, ...lintCompiledPrompt(contract, prompt)];
   const provider = options.targetProvider ?? "google_veo";
+  const compilerConfig = compilerConfigFor(contract.generationMode, provider);
   return {
     compilerVersion: SCENE_PROMPT_COMPILER_VERSION,
     deterministic: true,
     generationMode: contract.generationMode,
+    targetProvider: provider,
+    compilerConfig,
     prompt,
     negativePrompt: formatNegativePrompt(provider, [
       ...BASE_NEGATIVE_CONSTRAINTS,
@@ -164,6 +169,20 @@ export function lintSceneContract(contract: SceneContract): PromptLintIssue[] {
       "At least one Story Bible continuity lock is empty or generic.",
     ));
   }
+  if (!contract.visualStyle.trim()) {
+    issues.push(issue(
+      "missing_visual_style",
+      "error",
+      "Scene Contract must preserve a concrete visual style direction.",
+    ));
+  }
+  if (!contract.audioDirection.trim()) {
+    issues.push(issue(
+      "missing_audio_direction",
+      "error",
+      "Scene Contract must preserve a concrete audio direction.",
+    ));
+  }
   return issues;
 }
 
@@ -185,7 +204,7 @@ export function lintCompiledPrompt(
 }
 
 export function formatNegativePrompt(
-  provider: "google_veo" | "mock",
+  provider: PromptTargetProvider,
   constraints: readonly string[],
 ): string {
   const unique = [...new Set(constraints.map((value) => value.trim()).filter(Boolean))];
@@ -210,6 +229,8 @@ function compileTextToVideoPrompt(contract: SceneContract): string {
     `Product: ${contract.startState.productState}`,
     `Environment: ${contract.startState.environmentState}`,
     `Lighting: ${contract.startState.lightingState}`,
+    `Visual style: ${contract.visualStyle}`,
+    `Audio direction: ${contract.audioDirection}`,
     `Opening camera and composition: ${contract.startState.cameraState} ${contract.startState.compositionState}`,
     motionInstructions(contract),
     `Finish in this stable state for ${formatSeconds(contract.stableEndSeconds)} seconds: ${contract.endState.cameraState} ${contract.endState.compositionState}`,
@@ -221,7 +242,9 @@ function compileFirstFramePrompt(contract: SceneContract): string {
     "Use the supplied first frame as the authoritative visual state; do not redescribe or restage it.",
     `Scene goal: ${contract.goal}`,
     motionInstructions(contract),
-    "Preserve the locked identity, product geometry, environment layout, lighting direction, and visual style visible in the first frame.",
+    "Visual style continuity: preserve the style established by the supplied first frame without redescribing or restaging it.",
+    `Audio direction: ${contract.audioDirection}`,
+    "Preserve the identity, product geometry, environment layout, and lighting direction visible in the first frame.",
     `Settle naturally and hold the final composition for ${formatSeconds(contract.stableEndSeconds)} seconds.`,
   ].join("\n");
 }
@@ -233,6 +256,8 @@ function compileFirstLastFramePrompt(contract: SceneContract): string {
     `Scene goal: ${contract.goal}`,
     `Create one continuous transition driven by this action: ${contract.primaryAction}`,
     `Motion: ${contract.subjectMotion} Camera: ${contract.cameraMotion} Environment: ${contract.environmentMotion}`,
+    "Visual style continuity: maintain the style shared by the supplied boundary frames.",
+    `Audio direction: ${contract.audioDirection}`,
     `Required boundary changes: ${stateChanges}`,
     `Arrive at the supplied last frame smoothly and stabilize for ${formatSeconds(contract.stableEndSeconds)} seconds.`,
   ].join("\n");
@@ -243,6 +268,8 @@ function compileReferenceGuidedPrompt(contract: SceneContract): string {
     "Treat the bound reference inputs as the authority for identity, product truth, environment, and style.",
     `Scene goal: ${contract.goal}`,
     motionInstructions(contract),
+    "Visual style continuity: preserve the bound visual direction without redescribing it.",
+    `Audio direction: ${contract.audioDirection}`,
     "Preserve reference identity, product geometry, environment layout, lighting direction, and visual style without restating the reference content.",
     `Hold a stable ending for ${formatSeconds(contract.stableEndSeconds)} seconds.`,
   ].join("\n");
@@ -256,6 +283,17 @@ function motionInstructions(contract: SceneContract): string {
     `Environment motion: ${contract.environmentMotion}`,
     `Background policy: ${contract.backgroundPolicy}.`,
   ].join(" ");
+}
+
+function compilerConfigFor(
+  generationMode: GenerationMode,
+  targetProvider: PromptTargetProvider,
+): ScenePromptCompilerConfig {
+  return {
+    negativePromptFormat: targetProvider === "google_veo" ? "comma_separated" : "avoid_pipe",
+    visualStylePolicy: generationMode === "text_to_video" ? "explicit" : "continuity",
+    audioDirectionPolicy: "explicit",
+  };
 }
 
 function describeStateChanges(

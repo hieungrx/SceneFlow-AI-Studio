@@ -169,9 +169,11 @@ Owner xem toàn bộ final render bốn cảnh. Nếu approve, đóng Gate 3 ở
 
 ## Checkpoint 2.5A — Product Truth and Scene Contracts
 
-**Trạng thái:** Implementation local hoàn tất; chờ independent QA sau push
+**Trạng thái:** Independent QA lần đầu FAIL; correction implementation local hoàn tất và chờ re-review
 
 **Ngày implementation:** 2026-07-22
+
+**Ngày correction:** 2026-07-22
 
 ### Phạm vi đã triển khai
 
@@ -182,22 +184,39 @@ Owner xem toàn bộ final render bốn cảnh. Nếu approve, đóng Gate 3 ở
 - Replan tạo version mới và giữ authoritative history. Approved projection cần explicit confirmation; project có bất kỳ job/render history nào bị chặn replan để tránh orphan hoặc wrong-version reference trong schema hiện tại.
 - UI bỏ tuyên bố “AI hiểu ý bạn”, hiển thị deterministic compiler/planner version, Scene Contract fields và model thật trả về từ generation job.
 
+### Independent QA findings và correction
+
+- **Finding 1 — Product Truth runtime:** `POST /api/projects` và `PATCH /api/projects/:id` nhận/validate bảy trường Story Bible cụ thể. Generic placeholder và claim về reference/ảnh chưa bind trả `400 invalid_story_bible`; planner validate lại trước khi tạo storyboard. Project có execution history không được đổi Story Bible.
+- **Finding 2 — style/audio regression:** Scene Contract v2 giữ `visualStyle` và `audioDirection`. Compiler v2 đưa cả hai vào text-to-video; first-frame giữ style continuity mà không lặp static state và vẫn có audio; first/last-frame và reference-guided vẫn có audio direction.
+- **Finding 3 — incomplete prompt history:** `prompt_versions.assumptions_json` giữ exact compiled payload gồm positive prompt, negative prompt, generation mode, compiler version, target provider, compiler config và lint issues. Replan không xóa payload của version cũ.
+- **Finding 4 — UI overclaim:** bỏ `Identity locked`; UI dùng “Đã lập kế hoạch nhận dạng”, đổi continuity panel thành kế hoạch và ghi rõ ảnh private chưa được bind vào Veo.
+- Không có migration, provider request, renderer contract, reference binding, paid call hoặc Cloud change.
+
 ### Ranh giới giữ nguyên
 
 - Không đổi provider request; `lastFrameUri` vẫn là `null` và previous approved end frame vẫn đi vào `startFrameUri`.
 - Không reference asset binding, R2→GCS promotion, boundary keyframe, paid Veo call, durable workflow/queue, semantic QC/repair/escalation hoặc Render v2.
 - Không đổi ownership/auth, atomic generation admission, credit debit/refund, manual QC, downstream invalidation, private media hoặc extraction v2.
 
-### Bằng chứng local
+### Bằng chứng local correction
 
-- Targeted unit/UI/generation regression: **25/25 PASS**.
-- Targeted Wrangler/D1 integration cho versioning/history/ownership/approved guard/execution-history guard, concurrent replan và pipeline regressions: **26/26 PASS**.
+- Targeted unit/UI/generation regression gồm Story Bible validation, bốn compiler mode, style/audio và UI policy: PASS.
+- Targeted Wrangler/D1 integration: **27/27 PASS** ở lần chạy correction đầu; bao phủ project create/PATCH, Story Bible snapshot, concrete scene-1 prompt, full prompt-history preservation, ownership, replan guards và pipeline regressions.
 - Production build: PASS.
-- Full `npm run verify`: lint sạch, production build thành công, **200/200 test/subtest PASS** và renderer syntax hợp lệ. Lần verify đầu gặp một integration subtest transient dưới tải (**198/200**); isolated rerun, full parallel test rerun và full verify cuối đều PASS.
-- `git diff --check`: PASS.
+- Targeted correction suite cuối: **28/28 PASS**.
+- Wrangler/D1 integration sau fix PASS ba lần liên tiếp (hai standalone và một lần trong full suite), mỗi lần **27/27**.
+- Full `npm run verify`: lint sạch, production build thành công, **204/204 test/subtest PASS** và renderer syntax check hợp lệ.
+
+### Điều tra transient 198/200
+
+- Subtest chính xác: `approved storyboard requires explicit confirmation before replan`; lỗi `TypeError: fetch failed`. Parent suite cũng fail nên tổng đếm giảm từ 200 xuống 198.
+- Tái hiện được trên commit ban đầu khi subtest gọi HTTP ngay sau `wrangler d1 execute --local` chạy bằng một process thứ hai trên cùng persistence directory mà Wrangler dev đang dùng. Tất cả subtest sau tiếp tục PASS, chứng minh runtime chỉ gián đoạn tạm thời chứ replan state không sai.
+- Correction đổi SQL mutation helper thành async, chờ hai health probe liên tiếp sau mỗi out-of-process D1 mutation, và chỉ retry bounded cho network/HTML-503 transient; JSON application error không bị retry hoặc che giấu.
+- Runtime integration, full parallel suite và final `npm run verify` sau correction đều PASS. GitHub CI evidence được kiểm tra sau khi push correction commit.
 
 ### Hạn chế đã biết
 
 - 2.5A chưa có immutable generation attempt/candidate binding, nên không cho replan project đã có job/render history.
 - `reference_guided` và `first_last_frame` mới có deterministic compiler/test; active four-scene plan chưa dùng hai mode này.
 - Production Sites chưa deploy checkpoint này và vẫn dùng mock.
+- Correction chỉ chờ independent re-review; không bắt đầu Checkpoint 2.5B.

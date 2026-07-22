@@ -32,7 +32,7 @@ const project = {
 
 test("deterministic planner creates four structured Scene Contracts", () => {
   const plan = createPlan();
-  assert.equal(STORYBOARD_PLANNER_VERSION, "deterministic-storyboard-v1");
+  assert.equal(STORYBOARD_PLANNER_VERSION, "deterministic-storyboard-v2");
   assert.equal(plan.length, 4);
   assert.deepEqual(plan.map((scene) => scene.contract.sceneIndex), [1, 2, 3, 4]);
   assert.deepEqual(
@@ -40,8 +40,10 @@ test("deterministic planner creates four structured Scene Contracts", () => {
     ["text_to_video", "first_frame", "first_frame", "first_frame"],
   );
   for (const planned of plan) {
-    assert.equal(planned.contract.version, 1);
+    assert.equal(planned.contract.version, 2);
     assert.equal(planned.contract.stableEndSeconds, 0.75);
+    assert.equal(planned.contract.visualStyle, project.storyBible.visualStyle);
+    assert.equal(planned.contract.audioDirection, project.storyBible.audioDirection);
     assert.ok(planned.contract.continuityLocks.length >= 5);
     assert.match(planned.contract.primaryAction, /Vietnamese barista pours latte art/i);
   }
@@ -62,6 +64,9 @@ test("text-to-video prompt contains the concrete Story Bible locks", () => {
   assert.match(compilation.prompt, new RegExp(escapeRegExp(project.storyBible.productLock)));
   assert.match(compilation.prompt, new RegExp(escapeRegExp(project.storyBible.environmentLock)));
   assert.match(compilation.prompt, new RegExp(escapeRegExp(project.storyBible.lightingLock)));
+  assert.match(compilation.prompt, new RegExp(escapeRegExp(project.storyBible.visualStyle)));
+  assert.match(compilation.prompt, new RegExp(escapeRegExp(project.storyBible.audioDirection)));
+  assert.doesNotMatch(compilation.prompt, /reference (?:image|asset|input)|ảnh tham chiếu|ảnh tải lên/i);
 });
 
 test("same planner inputs and stable ID factory produce identical contracts", () => {

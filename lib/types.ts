@@ -29,6 +29,14 @@ export type StoryBible = {
   mustAvoid: string[];
 };
 
+export type StoryBibleField = keyof StoryBible;
+
+export type StoryBibleValidationIssue = {
+  field: StoryBibleField;
+  code: "missing" | "too_long" | "generic_placeholder" | "unbound_reference" | "invalid_list";
+  message: string;
+};
+
 export type GenerationMode =
   | "text_to_video"
   | "first_frame"
@@ -58,6 +66,8 @@ export type SceneContract = {
   cameraMotion: string;
   environmentMotion: string;
   backgroundPolicy: BackgroundPolicy;
+  visualStyle: string;
+  audioDirection: string;
   continuityLocks: string[];
   negativeConstraints: string[];
   generationMode: GenerationMode;
@@ -75,7 +85,9 @@ export type PromptLintIssueCode =
   | "excessive_sequential_actions"
   | "missing_continuity_locks"
   | "redundant_image_prompt"
-  | "generic_story_bible_lock";
+  | "generic_story_bible_lock"
+  | "missing_visual_style"
+  | "missing_audio_direction";
 
 export type PromptLintIssue = {
   code: PromptLintIssueCode;
@@ -87,9 +99,19 @@ export type ScenePromptCompilation = {
   compilerVersion: string;
   deterministic: true;
   generationMode: GenerationMode;
+  targetProvider: PromptTargetProvider;
+  compilerConfig: ScenePromptCompilerConfig;
   prompt: string;
   negativePrompt: string;
   lintIssues: PromptLintIssue[];
+};
+
+export type PromptTargetProvider = "google_veo" | "mock";
+
+export type ScenePromptCompilerConfig = {
+  negativePromptFormat: "comma_separated" | "avoid_pipe";
+  visualStylePolicy: "explicit" | "continuity";
+  audioDirectionPolicy: "explicit";
 };
 
 export type StoryboardCompilation = {
@@ -119,9 +141,13 @@ export type PromptVersion = {
   version: number;
   rawPrompt: string;
   optimizedPrompt: string;
+  negativePrompt: string;
   assumptions: string[];
   compilerVersion: string;
   generationMode: GenerationMode;
+  targetProvider: PromptTargetProvider;
+  compilerConfig: ScenePromptCompilerConfig;
+  compiledPayload: ScenePromptCompilation;
   lintIssues: PromptLintIssue[];
   accepted: boolean;
   createdAt: string;
