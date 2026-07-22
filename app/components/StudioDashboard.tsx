@@ -1,7 +1,14 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import type { AssetKind, GenerationJob, PromptCompilation, Scene } from "../../lib/types";
+import type {
+  AssetKind,
+  GenerationJob,
+  PromptCompilation,
+  Scene,
+  VideoModel,
+} from "../../lib/types";
+import { SCENE_PROMPT_COMPILER_VERSION } from "../../lib/prompt-compiler";
 import SceneCard from "./SceneCard";
 import { getPipelineActionPolicy } from "./scene-action-policy";
 
@@ -12,7 +19,11 @@ type StudioDashboardProps = {
 
 type ProjectResponse = { project: { id: string } };
 type ProjectDetailResponse = { project: { id: string }; scenes: Scene[] };
-type StoryboardResponse = { scenes: Scene[] };
+type StoryboardResponse = {
+  storyboard: { id: string; version: number };
+  scenes: Scene[];
+  planner: { kind: "deterministic_rules"; version: string };
+};
 type JobResponse = { job: GenerationJob; continuityReady?: boolean };
 type QcResponse = { scene: Scene; qc: { decision: "approve" | "reject"; reasonPersisted?: false } };
 type RenderResponse = { render: { id: string; status: string; outputVideoUri?: string | null; renderer?: string; mediaUrl?: string | null } };
@@ -44,7 +55,7 @@ export default function StudioDashboard({ userName, signedIn }: StudioDashboardP
   const [brief, setBrief] = useState(
     "Nữ barista Việt Nam pha một tách latte trong quán nhỏ, cảm giác ấm áp và cao cấp.",
   );
-  const [model, setModel] = useState("veo-3.1-lite");
+  const [model, setModel] = useState<VideoModel>("veo-3.1-lite");
   const [ratio, setRatio] = useState("9:16");
   const [optimized, setOptimized] = useState(false);
   const [compilation, setCompilation] = useState<PromptCompilation | null>(null);
@@ -57,6 +68,9 @@ export default function StudioDashboard({ userName, signedIn }: StudioDashboardP
   const [pendingSceneAction, setPendingSceneAction] = useState<PendingSceneAction | null>(null);
   const [notice, setNotice] = useState("Bản trải nghiệm đã sẵn sàng — chưa tiêu tốn credit.");
   const [renderMediaUrl, setRenderMediaUrl] = useState<string | null>(null);
+  const [plannerStatus, setPlannerStatus] = useState(
+    "Bản demo dùng bộ lập kế hoạch quy tắc xác định",
+  );
 
   const approvedScenes = useMemo(
     () => scenes.filter((scene) => scene.status === "approved").length,
@@ -132,6 +146,9 @@ export default function StudioDashboard({ userName, signedIn }: StudioDashboardP
       });
       setScenes(storyboard.scenes);
       setJobs([]);
+      setPlannerStatus(
+        `Storyboard v${storyboard.storyboard.version} • ${storyboard.planner.version} • không dùng LLM`,
+      );
       setNotice(
         failedUploads > 0
           ? `Đã tạo storyboard. ${failedUploads} ảnh chưa tải được; bạn vẫn có thể tiếp tục.`
@@ -202,7 +219,7 @@ export default function StudioDashboard({ userName, signedIn }: StudioDashboardP
         }
         return scene;
       }));
-      setNotice("Cảnh đã vào hàng đợi Veo 3.1 Lite. Hệ thống sẽ tự kiểm tra tiến độ.");
+      setNotice(`Cảnh đã vào hàng đợi ${modelLabel(job.model)}. Hệ thống sẽ tự kiểm tra tiến độ.`);
       await pollJob(job.id, sceneId);
     } catch (error) {
       setNotice(readableError(error));
@@ -439,13 +456,13 @@ export default function StudioDashboard({ userName, signedIn }: StudioDashboardP
               </div>
               <div className="form-row three">
                 <label>Template<select defaultValue="koc-product"><option value="koc-product">KOC review</option><option value="fashion">Thời trang</option><option value="faceless">Không lộ mặt</option></select></label>
-                <label>Model<select value={model} onChange={(event) => setModel(event.target.value)}><option value="veo-3.1-lite">Lite — tiết kiệm</option><option value="veo-3.1-fast">Fast — cân bằng</option><option value="veo-3.1-standard">Standard</option></select></label>
+                <label>Model<select value={model} onChange={(event) => setModel(event.target.value as VideoModel)}><option value="veo-3.1-lite">Lite — tiết kiệm</option><option value="veo-3.1-fast">Fast — cân bằng</option><option value="veo-3.1-standard">Standard</option></select></label>
                 <label>Khung hình<select value={ratio} onChange={(event) => setRatio(event.target.value)}><option value="9:16">9:16 dọc</option><option value="16:9">16:9 ngang</option></select></label>
               </div>
               <div className="optimizer-box">
                 <div><span className="spark" aria-hidden="true">✦</span><p><strong>Tối ưu prompt có kiểm soát</strong><small>Giữ nguyên ý chính, công khai mọi giả định.</small></p></div>
                 <button className={optimized ? "toggle is-on" : "toggle"} type="button" disabled={busy} onClick={optimizePrompt} aria-label="Bật tối ưu prompt" aria-pressed={optimized} />
-                {optimized && compilation ? <div className="optimized-preview"><strong>AI hiểu ý bạn</strong><p>{compilation.optimizedPromptEn}</p>{compilation.assumptions.map((item) => <small key={item}>• Giả định: {item}</small>)}{compilation.clarificationQuestions.map((item) => <small key={item}>• Cần xác nhận: {item}</small>)}</div> : null}
+                {optimized && compilation ? <div className="optimized-preview"><strong>{compilation.compiler.label} • {compilation.compiler.version}</strong><p>{compilation.optimizedPromptEn}</p>{compilation.assumptions.map((item) => <small key={item}>• Giả định: {item}</small>)}{compilation.clarificationQuestions.map((item) => <small key={item}>• Cần xác nhận: {item}</small>)}</div> : null}
               </div>
               <button className="primary-button full" type="submit" disabled={busy}>{busy ? "Đang xử lý…" : "Tạo storyboard 4 cảnh"}<span aria-hidden="true">→</span></button>
             </form>
@@ -454,9 +471,9 @@ export default function StudioDashboard({ userName, signedIn }: StudioDashboardP
           <article className="panel workflow-panel">
             <div className="panel-heading"><div><span className="section-kicker">PIPELINE</span><h2>Luồng sản xuất</h2></div><span><i className="live-dot" /> LIVE</span></div>
             <ol className="workflow-list">
-              <WorkflowStep index="01" title="Brief & sản phẩm" caption="Khóa ảnh tham chiếu" status="done" />
+              <WorkflowStep index="01" title="Brief & sản phẩm" caption="Ảnh được lưu private; chưa bind vào Veo" status="done" />
               <WorkflowStep index="02" title="Prompt & Story Bible" caption="7 trường continuity" status="done" />
-              <WorkflowStep index="03" title="Storyboard & keyframe" caption={`${scenes.length} cảnh • frame nối`} status="done" />
+              <WorkflowStep index="03" title="Storyboard & hợp đồng cảnh" caption={`${scenes.length} Scene Contracts có phiên bản`} status="done" />
               <WorkflowStep index="04" title="Tạo video Veo" caption={`${approvedScenes}/${scenes.length} cảnh đã duyệt`} status="active" />
               <WorkflowStep index="05" title="QC & ghép video" caption={renderReady ? "Sẵn sàng render" : "Chờ các cảnh còn lại"} status={renderReady ? "done" : "waiting"} />
             </ol>
@@ -466,7 +483,7 @@ export default function StudioDashboard({ userName, signedIn }: StudioDashboardP
 
         <section className="panel storyboard-panel">
           <div className="storyboard-heading">
-            <div><span className="section-kicker">PHASE 02–03</span><h2>Storyboard có continuity</h2><p>Frame cuối cảnh trước trở thành điểm neo cho cảnh tiếp theo.</p></div>
+            <div><span className="section-kicker">PHASE 02–03</span><h2>Storyboard có continuity</h2><p>{plannerStatus}. Frame cuối cảnh đã duyệt vẫn là điểm neo cho cảnh tiếp theo.</p></div>
             <div className="storyboard-actions"><button className="ghost-button compact" type="button">Story Bible</button><button className="primary-button compact" type="button" disabled={busy} onClick={generateNext}>Tạo cảnh tiếp</button></div>
           </div>
           <div className="storyboard-track">
@@ -537,7 +554,7 @@ function statusLabel(status: GenerationJob["status"]): string {
   return ({ queued: "Đang chờ", running: "Đang tạo", done: "Hoàn tất", failed: "Lỗi", canceled: "Đã dừng" } as Record<GenerationJob["status"], string>)[status];
 }
 
-function modelLabel(model: string): string {
+function modelLabel(model: VideoModel): string {
   return model === "veo-3.1-standard" ? "Veo Standard" : model === "veo-3.1-fast" ? "Veo Fast" : "Veo 3.1 Lite";
 }
 
@@ -581,6 +598,10 @@ function errorLabel(code?: string): string | null {
     invalid_scene_transition: "Trạng thái cảnh đã thay đổi. Hãy tải lại dự án và thử lại.",
     project_generation_in_progress: "Dự án đang có một cảnh được tạo. Vui lòng chờ hoàn tất.",
     project_render_in_progress: "Dự án đang ghép video nên chưa thể tạo cảnh mới.",
+    project_operation_in_progress: "Không thể lập lại storyboard khi generation hoặc render đang chạy.",
+    approved_storyboard_requires_confirmation: "Storyboard có cảnh đã duyệt; cần xác nhận rõ trước khi lập lại.",
+    storyboard_replan_has_execution_history: "Checkpoint 2.5A không lập lại storyboard đã có lịch sử generation/render để tránh orphan dữ liệu.",
+    storyboard_replan_conflict: "Storyboard đã thay đổi đồng thời. Hãy tải lại dự án trước khi thử lại.",
     provider_submission_uncertain: "Provider chưa xác nhận yêu cầu. Hệ thống đã khóa gửi lại để tránh tạo trùng.",
     provider_submission_failed: "Provider từ chối yêu cầu; credit đã được hoàn lại.",
     generation_in_progress: "Hãy chờ cảnh đang tạo hoàn tất trước khi ghép video.",
@@ -604,14 +625,54 @@ function delay(milliseconds: number): Promise<void> {
 }
 
 function makeDemoScene(index: number, title: string, action: string, endState: string, status: Scene["status"]): Scene {
+  const startState = index === 1
+    ? "Nhân vật, sản phẩm và ánh sáng đã khóa bằng Story Bible."
+    : "Tiếp nối chính xác frame cuối cảnh trước đã được duyệt.";
   return {
     id: `scene_demo_0${index}`,
     projectId: "prj_demo",
+    storyboardId: "storyboard_demo_v1",
+    storyboardVersion: 1,
+    sceneContract: {
+      version: 1,
+      sceneId: `scene_demo_0${index}`,
+      sceneIndex: index,
+      goal: `Thực hiện mục tiêu ${title.toLocaleLowerCase("vi")} trong một cảnh có kiểm soát.`,
+      startState: {
+        subjectState: "Nữ barista Việt Nam với tóc bob đen, áo linen be và tạp dề nâu đậm.",
+        productState: "Tách sứ trắng 180 ml có viền xanh cobalt, không chữ và không logo.",
+        environmentState: "Quán cà phê nhỏ với quầy gỗ óc chó và máy espresso màu đồng.",
+        lightingState: "Ánh sáng ấm buổi sáng chiếu từ bên trái máy quay.",
+        cameraState: index === 1 ? "Khung trung ổn định." : "Khớp frame cuối cảnh trước.",
+        compositionState: startState,
+      },
+      endState: {
+        subjectState: "Giữ nguyên nhân vật, tóc, trang phục và tỷ lệ cơ thể.",
+        productState: "Giữ nguyên tách sứ trắng, viền xanh và tỷ lệ sản phẩm.",
+        environmentState: "Giữ nguyên quán cà phê và vị trí vật thể nền.",
+        lightingState: "Giữ nguyên hướng và nhiệt độ màu của ánh sáng.",
+        cameraState: "Camera dừng hoàn toàn ở cuối cảnh.",
+        compositionState: endState,
+      },
+      primaryAction: action,
+      subjectMotion: "Một chuyển động tự nhiên phục vụ đúng hành động chính.",
+      cameraMotion: index === 4 ? "locked camera" : "slow controlled motion",
+      environmentMotion: "Chuyển động nền tối thiểu và liên tục.",
+      backgroundPolicy: index === 4 ? "static" : "controlled_motion",
+      continuityLocks: ["nhân vật", "sản phẩm", "bối cảnh", "ánh sáng", "phong cách"],
+      negativeConstraints: ["identity drift", "product deformation", "flicker", "text"],
+      generationMode: index === 1 ? "text_to_video" : "first_frame",
+      riskFactors: index > 1 ? ["approved_previous_frame_continuity"] : [],
+      stableEndSeconds: 0.75,
+    },
+    promptVersionId: `prompt_demo_0${index}_v1`,
+    promptVersion: 1,
+    promptCompilerVersion: SCENE_PROMPT_COMPILER_VERSION,
     sceneIndex: index,
     title,
     durationSeconds: 8,
     status,
-    startState: index === 1 ? "Nhân vật, sản phẩm và ánh sáng đã khóa." : "Tiếp nối chính xác frame cuối cảnh trước.",
+    startState,
     action,
     endState,
     prompt: `8-second cinematic shot. ${action} Preserve identity, product and lighting continuity.`,

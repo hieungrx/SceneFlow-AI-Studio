@@ -13,7 +13,7 @@
 | File business/utility | kebab-case | `veo-provider.ts`, `render-plan.ts`, `mock-store.ts` |
 | React component file | PascalCase | `StudioDashboard.tsx`, `SceneList.tsx` |
 | Type / Interface | PascalCase | `Scene`, `VideoProvider`, `RenderManifest` |
-| Function / Variable | camelCase | `buildRenderManifest`, `compileVideoPrompt` |
+| Function / Variable | camelCase | `buildRenderManifest`, `compileScenePrompt` |
 | DB column (Drizzle) | snake_case | `scene_index`, `created_at`, `story_bible_json` |
 | API error code | snake_case string | `"authentication_required"`, `"invalid_project_payload"` |
 | CSS class | kebab-case | Ưu tiên khai báo trong `globals.css`; xem ngoại lệ runtime ở mục 6 |
@@ -37,6 +37,7 @@ Không dùng auto-increment integer, không dùng UUID thô không có prefix. C
 ### Type Definitions
 
 - Tất cả shared types nằm trong `lib/types.ts`
+- Planning dùng `SceneContract` provider-neutral và serializable; không đưa GCS/R2 URI hoặc provider payload shape vào contract ở 2.5A
 - Dùng union literal cho status: `"draft" | "planning" | "generating" | ...`
 - Dùng `as const` cho static readonly arrays/tuples
 - Ưu tiên `Pick<>`, `Omit<>`, `Partial<>` thay vì duplicate type shape
@@ -79,6 +80,14 @@ function projectFromRow(row): Project {
 // ❌ Sai — không parse trong select query
 db.select({ bible: sql`json(story_bible_json)` })
 ```
+
+### Planning versioning
+
+- `storyboards.compiled_json` là nguồn authoritative cho Story Bible snapshot và Scene Contracts của từng version.
+- `prompt_versions.assumptions_json` giữ metadata mở rộng (`assumptions`, `compilerVersion`, `generationMode`, `lintIssues`) qua converter; không parse JSON trong route.
+- `scenes` là active projection, bắt buộc gắn `storyboard_id` cho planning version mới. Không coi scene rows là lịch sử authoritative.
+- Replan tạo storyboard/scene IDs mới và giữ storyboard/prompt rows cũ. Không xóa projection nếu project đã có job/render history vì operation schema hiện chưa có immutable version binding.
+- Thay active projection và ghi version/prompt/project status phải dùng D1 batch atomic theo pattern hiện có.
 
 ### Migration
 
@@ -162,10 +171,13 @@ export interface VideoProvider {
 
 ### Prompt Compilation
 
-Prompt đi qua `compileVideoPrompt()` trước khi gửi provider:
-- Output bao gồm: `optimizedPromptEn`, `negativePrompt`, `assumptions`, `clarificationQuestions`
-- Negative prompt luôn được append: `"identity drift, product deformation, duplicated objects, ..."`
-- Prompt cuối bằng tiếng Anh dù UI bằng tiếng Việt
+- Brief preview đi qua `compileBriefPreview()` và phải hiển thị đúng đây là deterministic rules, không phải AI/LLM planner.
+- Scene prompt đi qua `compileScenePrompt()` từ authoritative `SceneContract`.
+- Compiler phải dispatch rõ theo `text_to_video`, `first_frame`, `first_last_frame`, `reference_guided` và trả `compilerVersion` ổn định.
+- Text-to-video phải chứa concrete Story Bible truth. Image-guided modes tập trung vào motion/boundary và không lặp lại toàn bộ static state.
+- Negative constraint nằm provider-neutral trong contract; formatter tạo chuỗi theo target provider.
+- Prompt lint error chặn compile; warning được persist cùng prompt version. Không bỏ qua camera conflict, multiple primary action, stable-end hoặc continuity-lock checks.
+- Cùng contract, compiler version và target provider phải cho output deterministic.
 
 ---
 

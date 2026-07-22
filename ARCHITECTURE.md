@@ -1,6 +1,6 @@
 # ARCHITECTURE.md — Kiến trúc SceneFlow AI Studio
 
-> Tài liệu này mô tả kiến trúc hiện tại trong Checkpoint 2.4C. Code/test local, production Sites 2.4A và renderer Cloud Run/GCS staging 2.4B đã hoàn tất; Veo Gate 1 và continuity hai cảnh Gate 2 đã PASS cả kỹ thuật lẫn owner manual QC. Trong Gate 3, cảnh 3 và preview cứu hộ cảnh 4 đã được owner approve; generation đã dừng trong hard cap. Artifact cứu hộ đã được upload private và final render bốn cảnh đã PASS kiểm tra kỹ thuật, quyền riêng tư và HTTP Range. Gate 3 còn chờ owner playback QC cuối; các SIWC interaction checks cũng chưa hoàn tất.
+> Tài liệu này mô tả kiến trúc local sau Checkpoint 2.5A trên baseline 2.4C. Planning hiện dùng versioned, structured Scene Contracts và deterministic compiler; production Sites vẫn ở deployment 2.4A, renderer/Veo staging vẫn giữ trạng thái 2.4B–2.4C và chưa được nối vào production.
 
 ## 1. Mục tiêu kiến trúc
 
@@ -10,12 +10,13 @@ SceneFlow biến một brief thành video dài qua pipeline có kiểm soát:
 Brief → Story Bible → Storyboard → Tạo từng cảnh → QC → Ghép video
 ```
 
-Kiến trúc phải giữ bốn invariant nghiệp vụ:
+Kiến trúc phải giữ năm invariant nghiệp vụ:
 
 - Nhân vật, sản phẩm, bối cảnh và phong cách nhất quán giữa các cảnh.
 - Đích sản phẩm cho phép mỗi cảnh dài 4, 6 hoặc 8 giây; storyboard MVP hiện lập cảnh 8 giây.
 - Cảnh sau chỉ được tạo khi cảnh trước đã vượt QC.
 - Frame cuối của cảnh trước là điểm neo continuity cho cảnh kế tiếp.
+- Mỗi scene được lập từ một authoritative, provider-neutral Scene Contract có version; scene table chỉ là active projection.
 
 Output production là video 1080p đã ghép hoàn chỉnh. Studio hiện vẫn dùng mock để kiểm tra workflow, còn renderer staging đã ghép MP4 mẫu thật trên Cloud Run/GCS mà chưa gọi Veo.
 
@@ -29,6 +30,7 @@ flowchart LR
   W --> API["API routes"]
   W --> UI["Studio UI"]
   API --> BL["Business logic"]
+  BL --> PLAN["Deterministic storyboard planner<br/>Scene Contracts + prompt lint"]
   BL --> REPO["Repository"]
   REPO --> D1[("Cloudflare D1")]
   API --> R2[("Cloudflare R2")]
@@ -96,6 +98,7 @@ sequenceDiagram
 | --- | --- | --- |
 | `app/` | Studio UI và route handlers | Auth trước khi đọc/ghi dữ liệu owner; validate request; response có named key |
 | `lib/repository.ts` | Business query và ownership | Cổng duy nhất truy cập D1 cho business logic |
+| `lib/storyboard-planner.ts`, `lib/prompt-compiler.ts` | Planning và prompt compilation | Deterministic, versioned, provider-neutral contract; mode-aware prompt output |
 | `db/`, `drizzle/` | Schema và migration | D1/Drizzle; JSON text column dùng suffix `_json` |
 | `lib/veo-provider.ts` | Adapter video provider | Mock/Google được chọn qua factory; UI và route không chứa logic provider-specific |
 | `lib/renderer-client.ts`, `services/renderer/` | Contract ghép video | Renderer độc lập với provider và ứng dụng chính |
@@ -110,22 +113,32 @@ Không viết Drizzle query ngoài repository layer, không đưa binding Cloudf
 ### 5.1. Tạo và duyệt cảnh
 
 1. User đã xác thực tạo project; repository gắn owner phía server.
-2. Brief đi qua `compileVideoPrompt()` để tạo prompt có cấu trúc.
-3. Storyboard tạo bốn cảnh cùng dependency chain.
-4. Generation kiểm tra dependency và credit trước khi submit provider.
-5. Chỉ một cảnh đủ điều kiện được chạy; pipeline dừng khi generation đang chạy hoặc chờ manual QC.
-6. Cảnh được duyệt phải có video output và continuity frame hợp lệ.
-7. Frame cuối trở thành anchor cho cảnh kế tiếp.
-8. Regenerate cảnh trước sẽ vô hiệu hóa các cảnh downstream thuộc cùng owner.
+2. Deterministic planner kết hợp brief với Story Bible snapshot để tạo bốn `SceneContract` có version.
+3. Mode-aware compiler tạo prompt theo `text_to_video`, `first_frame`, `first_last_frame` hoặc `reference_guided`; 2.5A chỉ lập scene thật bằng hai mode đầu và không bind reference/keyframe.
+4. Storyboard version cùng authoritative contracts được ghi vào `storyboards.compiled_json`; prompt của từng scene được ghi vào `prompt_versions` kèm compiler version.
+5. `scenes` được thay bằng active projection liên kết qua `storyboard_id`; bốn scene vẫn giữ dependency chain hiện tại.
+6. Generation kiểm tra dependency và credit trước khi submit provider.
+7. Chỉ một cảnh đủ điều kiện được chạy; pipeline dừng khi generation đang chạy hoặc chờ manual QC.
+8. Cảnh được duyệt phải có video output và continuity frame hợp lệ.
+9. Frame cuối trở thành anchor cho cảnh kế tiếp.
+10. Regenerate cảnh trước sẽ vô hiệu hóa các cảnh downstream thuộc cùng owner.
 
-### 5.2. Render
+### 5.2. Versioning và active projection trong 2.5A
+
+- Mỗi POST storyboard tạo ID/version mới; compiled JSON cũ không bị ghi đè.
+- Prompt version dùng scene ID mới của version đó và giữ compiler version trong metadata JSON của row hiện có.
+- Một D1 batch đổi storyboard `active` cũ thành `superseded`, tạo version mới, thay active scene projection, ghi prompt rows và cập nhật project.
+- Replan có approved scene cần xác nhận rõ. Replan bị chặn nếu project đã có job/render history vì schema hiện chưa bind các operation cũ tới immutable scene version; đây là fail-closed để tránh orphan hoặc version drift.
+- GET storyboard history luôn đi qua project ownership; client không cung cấp owner ID.
+
+### 5.3. Render
 
 1. Chỉ project có toàn bộ cảnh đã approved mới tạo render manifest.
 2. Local/mock trả video mẫu để kiểm tra UI và contract.
 3. Production target gửi manifest đến FFmpeg renderer độc lập.
 4. Output private được lưu ở GCS và chỉ được phát qua API đã kiểm tra auth/ownership.
 
-### 5.3. Renderer staging 2.4B
+### 5.4. Renderer staging 2.4B
 
 - Cloud Run, Artifact Registry và GCS staging cùng ở `us-central1`.
 - Revision đang phục vụ là `sceneflow-renderer-staging-2-4b-01`, pin image bằng digest bất biến.
@@ -178,7 +191,7 @@ Implementation 2.4A hiện tại:
 
 ## 8. Dữ liệu và quyền sở hữu
 
-- D1 lưu metadata cho user, project, scene, generation job, asset, credit entry và final render.
+- D1 lưu metadata cho user, project, storyboard version, prompt version, active scene projection, generation job, asset, credit entry và final render.
 - Repository là nơi duy nhất thực thi business query và ownership check.
 - Credit ledger append-only; generation debit phải idempotent theo job.
 - R2 lưu reference assets của project; GCS lưu media do Veo/renderer production tạo.
@@ -189,6 +202,8 @@ Implementation 2.4A hiện tại:
 | Năng lực | Trạng thái |
 | --- | --- |
 | Studio, prompt compiler, Story Bible, storyboard | Hoàn tất MVP |
+| Versioned Scene Contracts, deterministic planner/compiler/lint | Hoàn tất local Checkpoint 2.5A |
+| Storyboard/prompt history trên schema hiện có | Hoàn tất local; không có migration |
 | Pipeline tuần tự, manual QC, continuity anchor | Hoàn tất Checkpoint 2.3 |
 | D1/R2, ownership, credit ledger | Hoàn tất nền tảng MVP |
 | Scene private media strict Range/MIME | Hoàn tất Checkpoint 2.3 |

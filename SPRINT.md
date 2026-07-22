@@ -166,3 +166,38 @@ Thứ tự đề xuất: auth origin → final-render media → asset ingestion 
 ### Bước tiếp theo
 
 Owner xem toàn bộ final render bốn cảnh. Nếu approve, đóng Gate 3 ở trạng thái PASS; nếu reject, ghi nhận Gate 3 chưa đạt và không gửi generation mới vì generation đã dừng trong hard cap. Hoàn tất riêng các kiểm tra SIWC tương tác còn lại; chỉ nối `RENDER_SERVICE_*` vào Studio khi scene source đã là `gs://` hoặc HTTPS hợp lệ.
+
+## Checkpoint 2.5A — Product Truth and Scene Contracts
+
+**Trạng thái:** Implementation local hoàn tất; chờ independent QA sau push
+
+**Ngày implementation:** 2026-07-22
+
+### Phạm vi đã triển khai
+
+- Thêm `SceneContract` provider-neutral có version, structured visual state đầu/cuối, primary action, motion, background policy, continuity locks, generation mode, risk factors và stable-end requirement.
+- Thay beat/prompt concatenation trong storyboard route bằng deterministic planner bốn cảnh và mode-aware compiler. Scene 1 dùng `text_to_video`; Scene 2–4 tiếp tục dùng `first_frame`, đúng workflow last-frame chaining hiện tại.
+- Thêm prompt lint cho multiple/sequential actions, camera conflict, locked-camera conflict, stable end, continuity locks, generic Story Bible locks và static-content repetition trong image-guided prompt.
+- Kích hoạt `storyboards`, `prompt_versions` và `scenes.storyboard_id` đã có sẵn; không tạo migration. `compiled_json` giữ authoritative contracts, prompt metadata giữ compiler version và scene rows chỉ là active projection.
+- Replan tạo version mới và giữ authoritative history. Approved projection cần explicit confirmation; project có bất kỳ job/render history nào bị chặn replan để tránh orphan hoặc wrong-version reference trong schema hiện tại.
+- UI bỏ tuyên bố “AI hiểu ý bạn”, hiển thị deterministic compiler/planner version, Scene Contract fields và model thật trả về từ generation job.
+
+### Ranh giới giữ nguyên
+
+- Không đổi provider request; `lastFrameUri` vẫn là `null` và previous approved end frame vẫn đi vào `startFrameUri`.
+- Không reference asset binding, R2→GCS promotion, boundary keyframe, paid Veo call, durable workflow/queue, semantic QC/repair/escalation hoặc Render v2.
+- Không đổi ownership/auth, atomic generation admission, credit debit/refund, manual QC, downstream invalidation, private media hoặc extraction v2.
+
+### Bằng chứng local
+
+- Targeted unit/UI/generation regression: **25/25 PASS**.
+- Targeted Wrangler/D1 integration cho versioning/history/ownership/approved guard/execution-history guard, concurrent replan và pipeline regressions: **26/26 PASS**.
+- Production build: PASS.
+- Full `npm run verify`: lint sạch, production build thành công, **200/200 test/subtest PASS** và renderer syntax hợp lệ. Lần verify đầu gặp một integration subtest transient dưới tải (**198/200**); isolated rerun, full parallel test rerun và full verify cuối đều PASS.
+- `git diff --check`: PASS.
+
+### Hạn chế đã biết
+
+- 2.5A chưa có immutable generation attempt/candidate binding, nên không cho replan project đã có job/render history.
+- `reference_guided` và `first_last_frame` mới có deterministic compiler/test; active four-scene plan chưa dùng hai mode này.
+- Production Sites chưa deploy checkpoint này và vẫn dùng mock.

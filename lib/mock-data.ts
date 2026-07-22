@@ -1,4 +1,6 @@
 import type { GenerationJob, Project, Scene } from "./types";
+import { SCENE_PROMPT_COMPILER_VERSION } from "./prompt-compiler";
+import { planDeterministicStoryboard } from "./storyboard-planner";
 
 const now = new Date().toISOString();
 
@@ -25,10 +27,20 @@ export const demoProject: Project = {
   updatedAt: now,
 };
 
+const demoPlan = planDeterministicStoryboard(demoProject, {
+  createSceneId: (sceneIndex) => `scene_0${sceneIndex}`,
+});
+
 export const demoScenes: Scene[] = [
   {
     id: "scene_01",
     projectId: demoProject.id,
+    storyboardId: "storyboard_demo_v1",
+    storyboardVersion: 1,
+    sceneContract: demoPlan[0].contract,
+    promptVersionId: "prompt_demo_scene_01_v1",
+    promptVersion: 1,
+    promptCompilerVersion: SCENE_PROMPT_COMPILER_VERSION,
     sceneIndex: 1,
     title: "Chuẩn bị hạt",
     durationSeconds: 8,
@@ -48,6 +60,12 @@ export const demoScenes: Scene[] = [
   {
     id: "scene_02",
     projectId: demoProject.id,
+    storyboardId: "storyboard_demo_v1",
+    storyboardVersion: 1,
+    sceneContract: demoPlan[1].contract,
+    promptVersionId: "prompt_demo_scene_02_v1",
+    promptVersion: 1,
+    promptCompilerVersion: SCENE_PROMPT_COMPILER_VERSION,
     sceneIndex: 2,
     title: "Chiết xuất espresso",
     durationSeconds: 8,
@@ -67,6 +85,12 @@ export const demoScenes: Scene[] = [
   {
     id: "scene_03",
     projectId: demoProject.id,
+    storyboardId: "storyboard_demo_v1",
+    storyboardVersion: 1,
+    sceneContract: demoPlan[2].contract,
+    promptVersionId: "prompt_demo_scene_03_v1",
+    promptVersion: 1,
+    promptCompilerVersion: SCENE_PROMPT_COMPILER_VERSION,
     sceneIndex: 3,
     title: "Latte art",
     durationSeconds: 8,
@@ -86,6 +110,12 @@ export const demoScenes: Scene[] = [
   {
     id: "scene_04",
     projectId: demoProject.id,
+    storyboardId: "storyboard_demo_v1",
+    storyboardVersion: 1,
+    sceneContract: demoPlan[3].contract,
+    promptVersionId: "prompt_demo_scene_04_v1",
+    promptVersion: 1,
+    promptCompilerVersion: SCENE_PROMPT_COMPILER_VERSION,
     sceneIndex: 4,
     title: "Hero shot",
     durationSeconds: 8,

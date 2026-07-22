@@ -1125,6 +1125,42 @@ textarea::placeholder {
   line-height: 1.55;
 }
 
+.scene-content > .scene-goal {
+  min-height: 58px;
+}
+
+.scene-goal strong {
+  color: #5f4ca2;
+}
+
+.scene-contract-grid {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.scene-contract-grid > div {
+  display: grid;
+  gap: 2px;
+  padding: 6px 7px;
+  border: 1px solid #eee9f6;
+  border-radius: 7px;
+  background: #faf8fd;
+}
+
+.scene-contract-grid strong {
+  color: #6553a6;
+  font-size: 7px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.scene-contract-grid span {
+  color: #70677d;
+  font-size: 7.5px;
+  line-height: 1.4;
+}
+
 .boundary-note {
   min-height: 39px;
   padding: 7px 8px;

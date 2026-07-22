@@ -79,6 +79,141 @@ test("manual QC API runtime behavior", async (t) => {
     assert.equal(response.body.error, "authentication_required");
   });
 
+  await t.test("storyboard replan increments versions and preserves authoritative history", async () => {
+    const fixture = await createStoryboard("storyboard-version@example.com");
+    assert.equal(fixture.storyboard.version, 1);
+    assert.equal(fixture.storyboard.compiled.sceneContracts.length, 4);
+    const originalStoryboard = structuredClone(fixture.storyboard);
+
+    const replanned = await api(`/api/projects/${fixture.project.id}/storyboard`, {
+      method: "POST",
+      ownerId: fixture.ownerId,
+    });
+    assert.equal(replanned.status, 201);
+    assert.equal(replanned.body.storyboard.version, 2);
+    assert.notEqual(replanned.body.storyboard.id, fixture.storyboard.id);
+
+    const history = await api(`/api/projects/${fixture.project.id}/storyboard`, {
+      ownerId: fixture.ownerId,
+    });
+    assert.equal(history.status, 200);
+    assert.deepEqual(history.body.storyboards.map((storyboard) => storyboard.version), [2, 1]);
+    assert.equal(history.body.storyboards[0].status, "active");
+    assert.equal(history.body.storyboards[1].status, "superseded");
+    assert.deepEqual(history.body.storyboards[1].compiled, originalStoryboard.compiled);
+    assert.equal(history.body.promptVersions.length, 8);
+    assert.ok(
+      originalStoryboard.compiled.sceneContracts.every((contract) =>
+        history.body.promptVersions.some((promptVersion) =>
+          promptVersion.sceneId === contract.sceneId &&
+          promptVersion.compilerVersion === "scene-contract-prompt-v1"
+        )
+      ),
+    );
+
+    const active = await api(`/api/projects/${fixture.project.id}`, {
+      ownerId: fixture.ownerId,
+    });
+    assert.equal(active.status, 200);
+    assert.equal(active.body.scenes.length, 4);
+    for (const scene of active.body.scenes) {
+      assert.equal(scene.storyboardId, replanned.body.storyboard.id);
+      assert.equal(scene.storyboardVersion, 2);
+      assert.equal(scene.sceneContract.sceneId, scene.id);
+      assert.equal(scene.promptVersion, 1);
+      assert.equal(scene.promptCompilerVersion, "scene-contract-prompt-v1");
+    }
+  });
+
+  await t.test("storyboard history retrieval is owner-scoped", async () => {
+    const fixture = await createStoryboard("storyboard-owner@example.com");
+    const unauthenticated = await api(`/api/projects/${fixture.project.id}/storyboard`);
+    assert.equal(unauthenticated.status, 401);
+    assert.equal(unauthenticated.body.error, "authentication_required");
+
+    const nonOwner = await api(`/api/projects/${fixture.project.id}/storyboard`, {
+      ownerId: "storyboard-other@example.com",
+    });
+    assert.equal(nonOwner.status, 404);
+    assert.equal(nonOwner.body.error, "project_not_found");
+  });
+
+  await t.test("concurrent replans serialize versions and leave one coherent active projection", async () => {
+    const fixture = await createStoryboard("storyboard-concurrent@example.com");
+    const responses = await Promise.all([
+      api(`/api/projects/${fixture.project.id}/storyboard`, {
+        method: "POST",
+        ownerId: fixture.ownerId,
+      }),
+      api(`/api/projects/${fixture.project.id}/storyboard`, {
+        method: "POST",
+        ownerId: fixture.ownerId,
+      }),
+    ]);
+    for (const response of responses) assert.equal(response.status, 201);
+    assert.deepEqual(responses.map((response) => response.body.storyboard.version).sort(), [2, 3]);
+
+    const history = await api(`/api/projects/${fixture.project.id}/storyboard`, {
+      ownerId: fixture.ownerId,
+    });
+    assert.deepEqual(history.body.storyboards.map((storyboard) => storyboard.version), [3, 2, 1]);
+    assert.equal(
+      history.body.storyboards.filter((storyboard) => storyboard.status === "active").length,
+      1,
+    );
+    const activeStoryboard = history.body.storyboards[0];
+    const project = await api(`/api/projects/${fixture.project.id}`, {
+      ownerId: fixture.ownerId,
+    });
+    assert.ok(project.body.scenes.every((scene) => scene.storyboardId === activeStoryboard.id));
+    assert.ok(project.body.scenes.every((scene) => scene.storyboardVersion === 3));
+  });
+
+  await t.test("approved storyboard requires explicit confirmation before replan", async () => {
+    const fixture = await createStoryboard("storyboard-approved@example.com");
+    executeLocalSql(
+      `UPDATE scenes SET status = 'approved' WHERE id = '${sqlText(fixture.scenes[0].id)}';`,
+    );
+
+    const blocked = await api(`/api/projects/${fixture.project.id}/storyboard`, {
+      method: "POST",
+      ownerId: fixture.ownerId,
+    });
+    assert.equal(blocked.status, 409);
+    assert.equal(blocked.body.error, "approved_storyboard_requires_confirmation");
+    const beforeConfirmation = await api(`/api/projects/${fixture.project.id}/storyboard`, {
+      ownerId: fixture.ownerId,
+    });
+    assert.deepEqual(beforeConfirmation.body.storyboards.map((storyboard) => storyboard.version), [1]);
+
+    const confirmed = await api(`/api/projects/${fixture.project.id}/storyboard`, {
+      method: "POST",
+      ownerId: fixture.ownerId,
+      body: { confirmApprovedReplacement: true },
+    });
+    assert.equal(confirmed.status, 201);
+    assert.equal(confirmed.body.storyboard.version, 2);
+  });
+
+  await t.test("replan refuses execution history so existing scene and job references stay valid", async () => {
+    const fixture = await createQualityCheckScene("storyboard-history-guard@example.com");
+    const blocked = await api(`/api/projects/${fixture.project.id}/storyboard`, {
+      method: "POST",
+      ownerId: fixture.ownerId,
+    });
+    assert.equal(blocked.status, 409);
+    assert.equal(blocked.body.error, "storyboard_replan_has_execution_history");
+
+    const project = await api(`/api/projects/${fixture.project.id}`, {
+      ownerId: fixture.ownerId,
+    });
+    assert.equal(project.status, 200);
+    assert.ok(project.body.scenes.some((scene) => scene.id === fixture.scene.id));
+    const job = await api(`/api/jobs/${fixture.job.id}`, { ownerId: fixture.ownerId });
+    assert.equal(job.status, 200);
+    assert.equal(job.body.job.sceneId, fixture.scene.id);
+  });
+
   await t.test("mock completion enters quality_check and repeated poll is idempotent", async () => {
     const fixture = await createQualityCheckScene("mock-idempotent@example.com");
     const beforeScene = fixture.scene;
@@ -564,7 +699,12 @@ async function createStoryboard(ownerId = owner) {
     ownerId,
   });
   assert.equal(storyboard.status, 201);
-  return { ownerId, project, scenes: storyboard.body.scenes };
+  return {
+    ownerId,
+    project,
+    storyboard: storyboard.body.storyboard,
+    scenes: storyboard.body.scenes,
+  };
 }
 
 async function readScene(ownerId, projectId, sceneId) {

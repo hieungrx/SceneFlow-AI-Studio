@@ -4,8 +4,11 @@ import type {
   FinalRender,
   GenerationJob,
   GenerationJobProcessingState,
+  PromptVersion,
   Project,
   Scene,
+  StoryboardVersion,
+  StoryboardVersionDraft,
 } from "./types";
 import type {
   GenerationActivationInput,
@@ -21,6 +24,8 @@ const jobs = new Map<string, GenerationJobProcessingState>(
   demoJobs.map((job) => [job.id, processingStateFromJob(job)]),
 );
 const renders = new Map<string, FinalRender>();
+const storyboards = new Map<string, StoryboardVersion>();
+const promptVersions = new Map<string, PromptVersion>();
 const creditBalances = new Map<string, number>();
 const generationCharges = new Map<string, { ownerId: string; amount: number }>();
 const generationRefunds = new Set<string>();
@@ -146,6 +151,72 @@ export function saveScenes(projectId: string, nextScenes: Scene[]): Scene[] {
   const project = projects.get(projectId);
   if (project) projects.set(projectId, { ...project, status: "planning", updatedAt: new Date().toISOString() });
   return getProjectScenes(projectId);
+}
+
+export function listStoryboards(projectId: string): StoryboardVersion[] {
+  return [...storyboards.values()]
+    .filter((storyboard) => storyboard.projectId === projectId)
+    .sort((a, b) => b.version - a.version);
+}
+
+export function listPromptVersions(projectId: string): PromptVersion[] {
+  return [...promptVersions.values()]
+    .filter((promptVersion) => promptVersion.projectId === projectId)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.version - a.version);
+}
+
+export function hasExecutionHistory(projectId: string): boolean {
+  return [...jobs.values()].some((job) => job.projectId === projectId) ||
+    [...renders.values()].some((render) => render.projectId === projectId);
+}
+
+export function createStoryboardVersion(
+  projectId: string,
+  draft: StoryboardVersionDraft,
+): { storyboard: StoryboardVersion; scenes: Scene[] } | null {
+  const project = projects.get(projectId);
+  if (!project || hasExecutionHistory(projectId)) return null;
+  const currentScenes = getProjectScenes(projectId);
+  if (!draft.allowApprovedReplacement && currentScenes.some((scene) => scene.status === "approved")) {
+    return null;
+  }
+
+  const version = Math.max(0, ...listStoryboards(projectId).map((storyboard) => storyboard.version)) + 1;
+  for (const [id, storyboard] of storyboards) {
+    if (storyboard.projectId === projectId && storyboard.status === "active") {
+      storyboards.set(id, { ...storyboard, status: "superseded" });
+    }
+  }
+  const storyboard: StoryboardVersion = {
+    id: draft.id,
+    projectId,
+    version,
+    status: "active",
+    sourcePrompt: draft.sourcePrompt,
+    compiled: draft.compiled,
+    createdAt: new Date().toISOString(),
+  };
+  storyboards.set(storyboard.id, storyboard);
+
+  for (const [id, scene] of scenes) {
+    if (scene.projectId === projectId) scenes.delete(id);
+  }
+  const activeScenes = draft.scenes.map((scene) => ({
+    ...scene,
+    projectId,
+    storyboardId: storyboard.id,
+    storyboardVersion: version,
+  }));
+  for (const scene of activeScenes) scenes.set(scene.id, scene);
+  for (const promptVersion of draft.promptVersions) {
+    promptVersions.set(promptVersion.id, promptVersion);
+  }
+  projects.set(projectId, {
+    ...project,
+    status: "planning",
+    updatedAt: new Date().toISOString(),
+  });
+  return { storyboard, scenes: activeScenes };
 }
 
 export function saveJob(job: GenerationJob): GenerationJobProcessingState {

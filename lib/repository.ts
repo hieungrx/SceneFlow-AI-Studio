@@ -6,8 +6,10 @@ import {
   creditLedger as creditLedgerTable,
   finalRenders as finalRendersTable,
   generationJobs as generationJobsTable,
+  promptVersions as promptVersionsTable,
   projects as projectsTable,
   scenes as scenesTable,
+  storyboards as storyboardsTable,
   users as usersTable,
 } from "../db/schema";
 import * as memory from "./mock-store";
@@ -23,9 +25,15 @@ import type {
   FinalRender,
   GenerationJob,
   GenerationJobProcessingState,
+  PromptLintIssue,
+  PromptVersion,
   Project,
   Scene,
+  SceneContract,
   StoryBible,
+  StoryboardCompilation,
+  StoryboardVersion,
+  StoryboardVersionDraft,
 } from "./types";
 
 type Db = ReturnType<typeof getDb>;
@@ -166,9 +174,233 @@ export async function listOwnedScenes(ownerId: string, projectId: string): Promi
         .from(scenesTable)
         .where(eq(scenesTable.projectId, projectId))
         .orderBy(scenesTable.sceneIndex);
-      return rows.map(sceneFromRow);
+      return scenesFromRows(db, rows);
     },
     () => memory.getProjectScenes(projectId),
+  );
+}
+
+export async function listOwnedStoryboards(
+  ownerId: string,
+  projectId: string,
+): Promise<StoryboardVersion[] | null> {
+  const project = await getOwnedProject(ownerId, projectId);
+  if (!project) return null;
+  return withMemoryFallback(
+    async (db) => {
+      const rows = await db
+        .select()
+        .from(storyboardsTable)
+        .where(eq(storyboardsTable.projectId, projectId))
+        .orderBy(desc(storyboardsTable.version));
+      return rows.map(storyboardFromRow);
+    },
+    () => memory.listStoryboards(projectId),
+  );
+}
+
+export async function listOwnedPromptVersions(
+  ownerId: string,
+  projectId: string,
+): Promise<PromptVersion[] | null> {
+  const project = await getOwnedProject(ownerId, projectId);
+  if (!project) return null;
+  return withMemoryFallback(
+    async (db) => {
+      const rows = await db
+        .select()
+        .from(promptVersionsTable)
+        .where(eq(promptVersionsTable.projectId, projectId))
+        .orderBy(desc(promptVersionsTable.createdAt), desc(promptVersionsTable.version));
+      return rows.map(promptVersionFromRow);
+    },
+    () => memory.listPromptVersions(projectId),
+  );
+}
+
+export async function hasOwnedExecutionHistory(
+  ownerId: string,
+  projectId: string,
+): Promise<boolean | null> {
+  const project = await getOwnedProject(ownerId, projectId);
+  if (!project) return null;
+  return withMemoryFallback(
+    async (db) => {
+      const [job] = await db
+        .select({ id: generationJobsTable.id })
+        .from(generationJobsTable)
+        .where(eq(generationJobsTable.projectId, projectId))
+        .limit(1);
+      if (job) return true;
+      const [render] = await db
+        .select({ id: finalRendersTable.id })
+        .from(finalRendersTable)
+        .where(eq(finalRendersTable.projectId, projectId))
+        .limit(1);
+      return Boolean(render);
+    },
+    () => memory.hasExecutionHistory(projectId),
+  );
+}
+
+export async function createOwnedStoryboardVersion(
+  ownerId: string,
+  projectId: string,
+  draft: StoryboardVersionDraft,
+): Promise<{ storyboard: StoryboardVersion; scenes: Scene[] } | null> {
+  const project = await getOwnedProject(ownerId, projectId);
+  if (!project) return null;
+  const createdAt = new Date().toISOString();
+
+  return withMemoryFallback(
+    async (db) => {
+      const client = db.$client;
+      const statements = [
+        client.prepare(`
+          UPDATE storyboards
+          SET status = 'superseded'
+          WHERE project_id = ?
+            AND status = 'active'
+            AND EXISTS (
+              SELECT 1 FROM projects
+              WHERE projects.id = storyboards.project_id
+                AND projects.owner_id = ?
+            )
+        `).bind(projectId, ownerId),
+        client.prepare(`
+          INSERT INTO storyboards (
+            id, project_id, version, status, source_prompt, compiled_json, created_at
+          )
+          SELECT
+            ?, ?,
+            COALESCE((SELECT MAX(version) + 1 FROM storyboards WHERE project_id = ?), 1),
+            'active', ?, ?, ?
+          WHERE EXISTS (
+            SELECT 1 FROM projects WHERE id = ? AND owner_id = ?
+          )
+        `).bind(
+          draft.id,
+          projectId,
+          projectId,
+          draft.sourcePrompt,
+          JSON.stringify(draft.compiled),
+          createdAt,
+          projectId,
+          ownerId,
+        ),
+        client.prepare(`
+          DELETE FROM scenes
+          WHERE project_id = ?
+            AND (? = 1 OR NOT EXISTS (
+              SELECT 1 FROM scenes approved_scene
+              WHERE approved_scene.project_id = ?
+                AND approved_scene.status = 'approved'
+            ))
+            AND NOT EXISTS (
+              SELECT 1 FROM generation_jobs WHERE generation_jobs.project_id = ?
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM final_renders WHERE final_renders.project_id = ?
+            )
+            AND EXISTS (
+              SELECT 1 FROM storyboards
+              JOIN projects ON projects.id = storyboards.project_id
+              WHERE storyboards.id = ?
+                AND storyboards.project_id = ?
+                AND projects.owner_id = ?
+            )
+        `).bind(
+          projectId,
+          draft.allowApprovedReplacement ? 1 : 0,
+          projectId,
+          projectId,
+          projectId,
+          draft.id,
+          projectId,
+          ownerId,
+        ),
+        ...draft.scenes.map((scene) => client.prepare(`
+          INSERT INTO scenes (
+            id, project_id, storyboard_id, scene_index, title, duration_seconds,
+            status, start_state, action, end_state, prompt, negative_prompt,
+            transition, depends_on_scene_id, start_frame_key, end_frame_key,
+            output_video_key, quality_score, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).bind(
+          scene.id,
+          projectId,
+          draft.id,
+          scene.sceneIndex,
+          scene.title,
+          scene.durationSeconds,
+          scene.status,
+          scene.startState,
+          scene.action,
+          scene.endState,
+          scene.prompt,
+          scene.negativePrompt,
+          scene.transition,
+          scene.dependsOnSceneId,
+          scene.startFrameUri,
+          scene.endFrameUri,
+          scene.outputVideoUri,
+          scene.qualityScore,
+          createdAt,
+          createdAt,
+        )),
+        ...draft.promptVersions.map((promptVersion) => client.prepare(`
+          INSERT INTO prompt_versions (
+            id, project_id, scene_id, version, raw_prompt, optimized_prompt,
+            assumptions_json, accepted, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).bind(
+          promptVersion.id,
+          projectId,
+          promptVersion.sceneId,
+          promptVersion.version,
+          promptVersion.rawPrompt,
+          promptVersion.optimizedPrompt,
+          JSON.stringify({
+            assumptions: promptVersion.assumptions,
+            compilerVersion: promptVersion.compilerVersion,
+            generationMode: promptVersion.generationMode,
+            lintIssues: promptVersion.lintIssues,
+          }),
+          promptVersion.accepted ? 1 : 0,
+          promptVersion.createdAt,
+        )),
+        client.prepare(`
+          UPDATE projects
+          SET status = 'planning', updated_at = ?
+          WHERE id = ?
+            AND owner_id = ?
+            AND EXISTS (
+              SELECT 1 FROM storyboards
+              WHERE storyboards.id = ?
+                AND storyboards.project_id = projects.id
+            )
+        `).bind(createdAt, projectId, ownerId, draft.id),
+      ];
+      await client.batch(statements);
+
+      const [storyboardRow] = await db
+        .select()
+        .from(storyboardsTable)
+        .where(and(eq(storyboardsTable.id, draft.id), eq(storyboardsTable.projectId, projectId)))
+        .limit(1);
+      if (!storyboardRow) return null;
+      const storyboard = storyboardFromRow(storyboardRow);
+      return {
+        storyboard,
+        scenes: draft.scenes.map((scene) => ({
+          ...scene,
+          projectId,
+          storyboardId: storyboard.id,
+          storyboardVersion: storyboard.version,
+        })),
+      };
+    },
+    () => memory.createStoryboardVersion(projectId, draft),
   );
 }
 
@@ -226,7 +458,9 @@ export async function getOwnedScene(ownerId: string, sceneId: string): Promise<S
       const [row] = await db.select().from(scenesTable).where(eq(scenesTable.id, sceneId)).limit(1);
       if (!row) return null;
       const project = await getOwnedProject(ownerId, row.projectId);
-      return project ? sceneFromRow(row) : null;
+      if (!project) return null;
+      const [scene] = await scenesFromRows(db, [row]);
+      return scene ?? null;
     },
     () => {
       const scene = memory.getScene(sceneId);
@@ -318,7 +552,9 @@ export async function transitionOwnedSceneFromStatus(
           ),
         )
         .returning();
-      return row ? sceneFromRow(row) : null;
+      if (!row) return null;
+      const [scene] = await scenesFromRows(db, [row]);
+      return scene ?? null;
     },
     () => {
       const current = memory.getScene(sceneId);
@@ -412,7 +648,9 @@ export async function transitionOwnedSceneFromStatusForJobClaim(
           ),
         )
         .returning();
-      return row ? sceneFromRow(row) : null;
+      if (!row) return null;
+      const [scene] = await scenesFromRows(db, [row]);
+      return scene ?? null;
     },
     () => {
       const current = memory.getScene(sceneId);
@@ -1452,10 +1690,90 @@ function projectFromRow(row: typeof projectsTable.$inferSelect): Project {
   };
 }
 
-function sceneFromRow(row: typeof scenesTable.$inferSelect): Scene {
+async function scenesFromRows(
+  db: Db,
+  rows: Array<typeof scenesTable.$inferSelect>,
+): Promise<Scene[]> {
+  if (rows.length === 0) return [];
+  const storyboardIds = [...new Set(
+    rows.map((row) => row.storyboardId).filter((id): id is string => Boolean(id)),
+  )];
+  const sceneIds = rows.map((row) => row.id);
+  const storyboardRows = storyboardIds.length > 0
+    ? await db.select().from(storyboardsTable).where(inArray(storyboardsTable.id, storyboardIds))
+    : [];
+  const promptRows = await db
+    .select()
+    .from(promptVersionsTable)
+    .where(inArray(promptVersionsTable.sceneId, sceneIds))
+    .orderBy(desc(promptVersionsTable.version));
+  const storyboardById = new Map(
+    storyboardRows.map((row) => [row.id, storyboardFromRow(row)]),
+  );
+  const promptBySceneId = new Map<string, PromptVersion>();
+  for (const row of promptRows) {
+    if (row.sceneId && !promptBySceneId.has(row.sceneId)) {
+      promptBySceneId.set(row.sceneId, promptVersionFromRow(row));
+    }
+  }
+  return rows.map((row) => sceneFromRow(
+    row,
+    row.storyboardId ? storyboardById.get(row.storyboardId) : undefined,
+    promptBySceneId.get(row.id),
+  ));
+}
+
+function storyboardFromRow(row: typeof storyboardsTable.$inferSelect): StoryboardVersion {
   return {
     id: row.id,
     projectId: row.projectId,
+    version: row.version,
+    status: row.status === "approved"
+      ? "approved"
+      : row.status === "superseded"
+        ? "superseded"
+        : "active",
+    sourcePrompt: row.sourcePrompt,
+    compiled: parseStoryboardCompilation(row.compiledJson),
+    createdAt: row.createdAt,
+  };
+}
+
+function promptVersionFromRow(row: typeof promptVersionsTable.$inferSelect): PromptVersion {
+  const metadata = parsePromptVersionMetadata(row.assumptionsJson);
+  return {
+    id: row.id,
+    projectId: row.projectId,
+    sceneId: row.sceneId,
+    version: row.version,
+    rawPrompt: row.rawPrompt,
+    optimizedPrompt: row.optimizedPrompt,
+    assumptions: metadata.assumptions,
+    compilerVersion: metadata.compilerVersion,
+    generationMode: metadata.generationMode,
+    lintIssues: metadata.lintIssues,
+    accepted: row.accepted,
+    createdAt: row.createdAt,
+  };
+}
+
+function sceneFromRow(
+  row: typeof scenesTable.$inferSelect,
+  storyboard?: StoryboardVersion,
+  promptVersion?: PromptVersion,
+): Scene {
+  const sceneContract = storyboard?.compiled.sceneContracts.find(
+    (contract) => contract.sceneId === row.id,
+  ) ?? legacySceneContractFromRow(row);
+  return {
+    id: row.id,
+    projectId: row.projectId,
+    storyboardId: row.storyboardId,
+    storyboardVersion: storyboard?.version ?? null,
+    sceneContract,
+    promptVersionId: promptVersion?.id ?? null,
+    promptVersion: promptVersion?.version ?? null,
+    promptCompilerVersion: promptVersion?.compilerVersion ?? null,
     sceneIndex: row.sceneIndex,
     title: row.title,
     durationSeconds: row.durationSeconds,
@@ -1472,6 +1790,119 @@ function sceneFromRow(row: typeof scenesTable.$inferSelect): Scene {
     outputVideoUri: row.outputVideoKey,
     qualityScore: row.qualityScore,
   };
+}
+
+function legacySceneContractFromRow(row: typeof scenesTable.$inferSelect): SceneContract {
+  return {
+    version: 0,
+    sceneId: row.id,
+    sceneIndex: row.sceneIndex,
+    goal: row.title,
+    startState: {
+      subjectState: row.startState,
+      productState: row.startState,
+      environmentState: "Legacy scene did not persist a structured environment state.",
+      lightingState: "Legacy scene did not persist a structured lighting state.",
+      cameraState: "Legacy scene did not persist a structured camera state.",
+      compositionState: row.startState,
+    },
+    endState: {
+      subjectState: row.endState,
+      productState: row.endState,
+      environmentState: "Legacy scene did not persist a structured environment state.",
+      lightingState: "Legacy scene did not persist a structured lighting state.",
+      cameraState: "Legacy scene did not persist a structured camera state.",
+      compositionState: row.endState,
+    },
+    primaryAction: row.action,
+    subjectMotion: row.action,
+    cameraMotion: "legacy unspecified camera motion",
+    environmentMotion: "legacy unspecified environment motion",
+    backgroundPolicy: "controlled_motion",
+    continuityLocks: [row.startState, row.endState].filter(Boolean),
+    negativeConstraints: row.negativePrompt.split(",").map((value) => value.trim()).filter(Boolean),
+    generationMode: row.sceneIndex === 1 ? "text_to_video" : "first_frame",
+    riskFactors: ["legacy_unstructured_scene"],
+    stableEndSeconds: 0.5,
+  };
+}
+
+function parseStoryboardCompilation(value: string): StoryboardCompilation {
+  try {
+    const parsed = JSON.parse(value) as Partial<StoryboardCompilation>;
+    if (
+      parsed.schemaVersion === 1 &&
+      parsed.planner?.kind === "deterministic_rules" &&
+      typeof parsed.planner.version === "string" &&
+      parsed.storyBible &&
+      Array.isArray(parsed.sceneContracts)
+    ) {
+      return parsed as StoryboardCompilation;
+    }
+  } catch {
+    // Fall through to a safe legacy representation.
+  }
+  return {
+    schemaVersion: 1,
+    planner: { kind: "deterministic_rules", version: "legacy-unstructured" },
+    storyBible: DEFAULT_STORY_BIBLE,
+    sceneContracts: [],
+  };
+}
+
+function parsePromptVersionMetadata(value: string): {
+  assumptions: string[];
+  compilerVersion: string;
+  generationMode: PromptVersion["generationMode"];
+  lintIssues: PromptLintIssue[];
+} {
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown> | unknown[];
+    if (Array.isArray(parsed)) {
+      return {
+        assumptions: parsed.filter((item): item is string => typeof item === "string"),
+        compilerVersion: "legacy-unversioned",
+        generationMode: "text_to_video",
+        lintIssues: [],
+      };
+    }
+    return {
+      assumptions: Array.isArray(parsed.assumptions)
+        ? parsed.assumptions.filter((item): item is string => typeof item === "string")
+        : [],
+      compilerVersion: typeof parsed.compilerVersion === "string"
+        ? parsed.compilerVersion
+        : "legacy-unversioned",
+      generationMode: isGenerationMode(parsed.generationMode)
+        ? parsed.generationMode
+        : "text_to_video",
+      lintIssues: Array.isArray(parsed.lintIssues)
+        ? parsed.lintIssues.filter(isPromptLintIssue)
+        : [],
+    };
+  } catch {
+    return {
+      assumptions: [],
+      compilerVersion: "legacy-unversioned",
+      generationMode: "text_to_video",
+      lintIssues: [],
+    };
+  }
+}
+
+function isGenerationMode(value: unknown): value is PromptVersion["generationMode"] {
+  return value === "text_to_video" ||
+    value === "first_frame" ||
+    value === "first_last_frame" ||
+    value === "reference_guided";
+}
+
+function isPromptLintIssue(value: unknown): value is PromptLintIssue {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<PromptLintIssue>;
+  return typeof candidate.code === "string" &&
+    (candidate.severity === "error" || candidate.severity === "warning") &&
+    typeof candidate.message === "string";
 }
 
 function processingJobFromRow(
