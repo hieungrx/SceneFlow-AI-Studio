@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getChatGPTUser } from "../../chatgpt-auth";
 import { createOwnedProject, ensureUser, listOwnedProjects } from "../../../lib/repository";
+import { parseConcreteStoryBible } from "../../../lib/story-bible";
 import type { AspectRatio, VideoModel } from "../../../lib/types";
 
 export async function GET() {
@@ -17,6 +18,13 @@ export async function POST(request: Request) {
   if (!body || !isNonEmptyText(body.name, 120) || !isNonEmptyText(body.brief, 3000)) {
     return NextResponse.json({ error: "invalid_project_payload" }, { status: 400 });
   }
+  const storyBibleResult = parseConcreteStoryBible(body.storyBible);
+  if (!storyBibleResult.storyBible) {
+    return NextResponse.json(
+      { error: "invalid_story_bible", issues: storyBibleResult.issues },
+      { status: 400 },
+    );
+  }
 
   await ensureUser(user.email, user.displayName);
   const project = await createOwnedProject(user.email, {
@@ -26,6 +34,7 @@ export async function POST(request: Request) {
     aspectRatio: (body.aspectRatio === "16:9" ? "16:9" : "9:16") as AspectRatio,
     targetDurationSeconds: clampDuration(body.targetDurationSeconds),
     model: normalizeModel(body.model),
+    storyBible: storyBibleResult.storyBible,
   });
   return NextResponse.json({ project }, { status: 201 });
 }

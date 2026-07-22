@@ -6,11 +6,14 @@ import {
   creditLedger as creditLedgerTable,
   finalRenders as finalRendersTable,
   generationJobs as generationJobsTable,
+  promptVersions as promptVersionsTable,
   projects as projectsTable,
   scenes as scenesTable,
+  storyboards as storyboardsTable,
   users as usersTable,
 } from "../db/schema";
 import * as memory from "./mock-store";
+import { LEGACY_UNSET_STORY_BIBLE } from "./story-bible";
 import type {
   GenerationActivationInput,
   GenerationFailureInput,
@@ -23,28 +26,24 @@ import type {
   FinalRender,
   GenerationJob,
   GenerationJobProcessingState,
+  PromptLintIssue,
+  PromptVersion,
   Project,
   Scene,
+  SceneContract,
   StoryBible,
+  StoryboardCompilation,
+  StoryboardVersion,
+  StoryboardVersionDraft,
 } from "./types";
 
 type Db = ReturnType<typeof getDb>;
 type ProjectInput = Pick<
   Project,
-  "name" | "brief" | "template" | "aspectRatio" | "targetDurationSeconds" | "model"
+  "name" | "brief" | "template" | "aspectRatio" | "targetDurationSeconds" | "model" | "storyBible"
 >;
 
 const EXTRACTION_CLAIM_TOKEN_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
-
-const DEFAULT_STORY_BIBLE: StoryBible = {
-  characterLock: "Giữ nguyên khuôn mặt, tóc, vóc dáng và trang phục từ ảnh tham chiếu.",
-  productLock: "Giữ đúng thiết kế, màu sắc, nhãn và tỷ lệ sản phẩm.",
-  environmentLock: "Dùng cùng một không gian trong các cảnh liên tục.",
-  lightingLock: "Giữ nguyên hướng sáng, nhiệt độ màu và thời điểm trong ngày.",
-  visualStyle: "Photorealistic cinematic commercial, natural motion, realistic textures.",
-  audioDirection: "Một nền âm thanh xuyên suốt; lời thoại chỉ xuất hiện khi người dùng yêu cầu.",
-  mustAvoid: ["identity drift", "product deformation", "duplicated objects", "unreadable text"],
-};
 
 async function withMemoryFallback<T>(
   primary: (db: Db) => Promise<T>,
@@ -129,7 +128,7 @@ export async function createOwnedProject(ownerId: string, input: ProjectInput): 
     ownerId,
     ...input,
     status: "draft",
-    storyBible: DEFAULT_STORY_BIBLE,
+    storyBible: cloneStoryBible(input.storyBible),
     createdAt,
     updatedAt: createdAt,
   };
@@ -156,6 +155,38 @@ export async function createOwnedProject(ownerId: string, input: ProjectInput): 
   );
 }
 
+export async function updateOwnedProjectStoryBible(
+  ownerId: string,
+  projectId: string,
+  storyBible: StoryBible,
+): Promise<Project | null> {
+  const updatedAt = new Date().toISOString();
+  return withMemoryFallback(
+    async (db) => {
+      const result = await db.$client.prepare(`
+        UPDATE projects
+        SET story_bible_json = ?, updated_at = ?
+        WHERE id = ?
+          AND owner_id = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM generation_jobs WHERE generation_jobs.project_id = projects.id
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM final_renders WHERE final_renders.project_id = projects.id
+          )
+      `).bind(JSON.stringify(storyBible), updatedAt, projectId, ownerId).run();
+      if (Number(result.meta.changes) !== 1) return null;
+      const [row] = await db
+        .select()
+        .from(projectsTable)
+        .where(and(eq(projectsTable.id, projectId), eq(projectsTable.ownerId, ownerId)))
+        .limit(1);
+      return row ? projectFromRow(row) : null;
+    },
+    () => memory.updateProjectStoryBible(projectId, ownerId, storyBible),
+  );
+}
+
 export async function listOwnedScenes(ownerId: string, projectId: string): Promise<Scene[]> {
   const project = await getOwnedProject(ownerId, projectId);
   if (!project) return [];
@@ -166,9 +197,237 @@ export async function listOwnedScenes(ownerId: string, projectId: string): Promi
         .from(scenesTable)
         .where(eq(scenesTable.projectId, projectId))
         .orderBy(scenesTable.sceneIndex);
-      return rows.map(sceneFromRow);
+      return scenesFromRows(db, rows);
     },
     () => memory.getProjectScenes(projectId),
+  );
+}
+
+export async function listOwnedStoryboards(
+  ownerId: string,
+  projectId: string,
+): Promise<StoryboardVersion[] | null> {
+  const project = await getOwnedProject(ownerId, projectId);
+  if (!project) return null;
+  return withMemoryFallback(
+    async (db) => {
+      const rows = await db
+        .select()
+        .from(storyboardsTable)
+        .where(eq(storyboardsTable.projectId, projectId))
+        .orderBy(desc(storyboardsTable.version));
+      return rows.map(storyboardFromRow);
+    },
+    () => memory.listStoryboards(projectId),
+  );
+}
+
+export async function listOwnedPromptVersions(
+  ownerId: string,
+  projectId: string,
+): Promise<PromptVersion[] | null> {
+  const project = await getOwnedProject(ownerId, projectId);
+  if (!project) return null;
+  return withMemoryFallback(
+    async (db) => {
+      const rows = await db
+        .select()
+        .from(promptVersionsTable)
+        .where(eq(promptVersionsTable.projectId, projectId))
+        .orderBy(desc(promptVersionsTable.createdAt), desc(promptVersionsTable.version));
+      return rows.map(promptVersionFromRow);
+    },
+    () => memory.listPromptVersions(projectId),
+  );
+}
+
+export async function hasOwnedExecutionHistory(
+  ownerId: string,
+  projectId: string,
+): Promise<boolean | null> {
+  const project = await getOwnedProject(ownerId, projectId);
+  if (!project) return null;
+  return withMemoryFallback(
+    async (db) => {
+      const [job] = await db
+        .select({ id: generationJobsTable.id })
+        .from(generationJobsTable)
+        .where(eq(generationJobsTable.projectId, projectId))
+        .limit(1);
+      if (job) return true;
+      const [render] = await db
+        .select({ id: finalRendersTable.id })
+        .from(finalRendersTable)
+        .where(eq(finalRendersTable.projectId, projectId))
+        .limit(1);
+      return Boolean(render);
+    },
+    () => memory.hasExecutionHistory(projectId),
+  );
+}
+
+export async function createOwnedStoryboardVersion(
+  ownerId: string,
+  projectId: string,
+  draft: StoryboardVersionDraft,
+): Promise<{ storyboard: StoryboardVersion; scenes: Scene[] } | null> {
+  const project = await getOwnedProject(ownerId, projectId);
+  if (!project) return null;
+  const createdAt = new Date().toISOString();
+
+  return withMemoryFallback(
+    async (db) => {
+      const client = db.$client;
+      const statements = [
+        client.prepare(`
+          UPDATE storyboards
+          SET status = 'superseded'
+          WHERE project_id = ?
+            AND status = 'active'
+            AND EXISTS (
+              SELECT 1 FROM projects
+              WHERE projects.id = storyboards.project_id
+                AND projects.owner_id = ?
+            )
+        `).bind(projectId, ownerId),
+        client.prepare(`
+          INSERT INTO storyboards (
+            id, project_id, version, status, source_prompt, compiled_json, created_at
+          )
+          SELECT
+            ?, ?,
+            COALESCE((SELECT MAX(version) + 1 FROM storyboards WHERE project_id = ?), 1),
+            'active', ?, ?, ?
+          WHERE EXISTS (
+            SELECT 1 FROM projects WHERE id = ? AND owner_id = ?
+          )
+        `).bind(
+          draft.id,
+          projectId,
+          projectId,
+          draft.sourcePrompt,
+          JSON.stringify(draft.compiled),
+          createdAt,
+          projectId,
+          ownerId,
+        ),
+        client.prepare(`
+          DELETE FROM scenes
+          WHERE project_id = ?
+            AND (? = 1 OR NOT EXISTS (
+              SELECT 1 FROM scenes approved_scene
+              WHERE approved_scene.project_id = ?
+                AND approved_scene.status = 'approved'
+            ))
+            AND NOT EXISTS (
+              SELECT 1 FROM generation_jobs WHERE generation_jobs.project_id = ?
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM final_renders WHERE final_renders.project_id = ?
+            )
+            AND EXISTS (
+              SELECT 1 FROM storyboards
+              JOIN projects ON projects.id = storyboards.project_id
+              WHERE storyboards.id = ?
+                AND storyboards.project_id = ?
+                AND projects.owner_id = ?
+            )
+        `).bind(
+          projectId,
+          draft.allowApprovedReplacement ? 1 : 0,
+          projectId,
+          projectId,
+          projectId,
+          draft.id,
+          projectId,
+          ownerId,
+        ),
+        ...draft.scenes.map((scene) => client.prepare(`
+          INSERT INTO scenes (
+            id, project_id, storyboard_id, scene_index, title, duration_seconds,
+            status, start_state, action, end_state, prompt, negative_prompt,
+            transition, depends_on_scene_id, start_frame_key, end_frame_key,
+            output_video_key, quality_score, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).bind(
+          scene.id,
+          projectId,
+          draft.id,
+          scene.sceneIndex,
+          scene.title,
+          scene.durationSeconds,
+          scene.status,
+          scene.startState,
+          scene.action,
+          scene.endState,
+          scene.prompt,
+          scene.negativePrompt,
+          scene.transition,
+          scene.dependsOnSceneId,
+          scene.startFrameUri,
+          scene.endFrameUri,
+          scene.outputVideoUri,
+          scene.qualityScore,
+          createdAt,
+          createdAt,
+        )),
+        ...draft.promptVersions.map((promptVersion) => client.prepare(`
+          INSERT INTO prompt_versions (
+            id, project_id, scene_id, version, raw_prompt, optimized_prompt,
+            assumptions_json, accepted, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).bind(
+          promptVersion.id,
+          projectId,
+          promptVersion.sceneId,
+          promptVersion.version,
+          promptVersion.rawPrompt,
+          promptVersion.optimizedPrompt,
+          JSON.stringify({
+            assumptions: promptVersion.assumptions,
+            compilerVersion: promptVersion.compilerVersion,
+            generationMode: promptVersion.generationMode,
+            targetProvider: promptVersion.targetProvider,
+            negativePrompt: promptVersion.negativePrompt,
+            compilerConfig: promptVersion.compilerConfig,
+            compiledPayload: promptVersion.compiledPayload,
+            lintIssues: promptVersion.lintIssues,
+          }),
+          promptVersion.accepted ? 1 : 0,
+          promptVersion.createdAt,
+        )),
+        client.prepare(`
+          UPDATE projects
+          SET status = 'planning', updated_at = ?
+          WHERE id = ?
+            AND owner_id = ?
+            AND EXISTS (
+              SELECT 1 FROM storyboards
+              WHERE storyboards.id = ?
+                AND storyboards.project_id = projects.id
+            )
+        `).bind(createdAt, projectId, ownerId, draft.id),
+      ];
+      await client.batch(statements);
+
+      const [storyboardRow] = await db
+        .select()
+        .from(storyboardsTable)
+        .where(and(eq(storyboardsTable.id, draft.id), eq(storyboardsTable.projectId, projectId)))
+        .limit(1);
+      if (!storyboardRow) return null;
+      const storyboard = storyboardFromRow(storyboardRow);
+      return {
+        storyboard,
+        scenes: draft.scenes.map((scene) => ({
+          ...scene,
+          projectId,
+          storyboardId: storyboard.id,
+          storyboardVersion: storyboard.version,
+        })),
+      };
+    },
+    () => memory.createStoryboardVersion(projectId, draft),
   );
 }
 
@@ -226,7 +485,9 @@ export async function getOwnedScene(ownerId: string, sceneId: string): Promise<S
       const [row] = await db.select().from(scenesTable).where(eq(scenesTable.id, sceneId)).limit(1);
       if (!row) return null;
       const project = await getOwnedProject(ownerId, row.projectId);
-      return project ? sceneFromRow(row) : null;
+      if (!project) return null;
+      const [scene] = await scenesFromRows(db, [row]);
+      return scene ?? null;
     },
     () => {
       const scene = memory.getScene(sceneId);
@@ -318,7 +579,9 @@ export async function transitionOwnedSceneFromStatus(
           ),
         )
         .returning();
-      return row ? sceneFromRow(row) : null;
+      if (!row) return null;
+      const [scene] = await scenesFromRows(db, [row]);
+      return scene ?? null;
     },
     () => {
       const current = memory.getScene(sceneId);
@@ -412,7 +675,9 @@ export async function transitionOwnedSceneFromStatusForJobClaim(
           ),
         )
         .returning();
-      return row ? sceneFromRow(row) : null;
+      if (!row) return null;
+      const [scene] = await scenesFromRows(db, [row]);
+      return scene ?? null;
     },
     () => {
       const current = memory.getScene(sceneId);
@@ -1452,10 +1717,94 @@ function projectFromRow(row: typeof projectsTable.$inferSelect): Project {
   };
 }
 
-function sceneFromRow(row: typeof scenesTable.$inferSelect): Scene {
+async function scenesFromRows(
+  db: Db,
+  rows: Array<typeof scenesTable.$inferSelect>,
+): Promise<Scene[]> {
+  if (rows.length === 0) return [];
+  const storyboardIds = [...new Set(
+    rows.map((row) => row.storyboardId).filter((id): id is string => Boolean(id)),
+  )];
+  const sceneIds = rows.map((row) => row.id);
+  const storyboardRows = storyboardIds.length > 0
+    ? await db.select().from(storyboardsTable).where(inArray(storyboardsTable.id, storyboardIds))
+    : [];
+  const promptRows = await db
+    .select()
+    .from(promptVersionsTable)
+    .where(inArray(promptVersionsTable.sceneId, sceneIds))
+    .orderBy(desc(promptVersionsTable.version));
+  const storyboardById = new Map(
+    storyboardRows.map((row) => [row.id, storyboardFromRow(row)]),
+  );
+  const promptBySceneId = new Map<string, PromptVersion>();
+  for (const row of promptRows) {
+    if (row.sceneId && !promptBySceneId.has(row.sceneId)) {
+      promptBySceneId.set(row.sceneId, promptVersionFromRow(row));
+    }
+  }
+  return rows.map((row) => sceneFromRow(
+    row,
+    row.storyboardId ? storyboardById.get(row.storyboardId) : undefined,
+    promptBySceneId.get(row.id),
+  ));
+}
+
+function storyboardFromRow(row: typeof storyboardsTable.$inferSelect): StoryboardVersion {
   return {
     id: row.id,
     projectId: row.projectId,
+    version: row.version,
+    status: row.status === "approved"
+      ? "approved"
+      : row.status === "superseded"
+        ? "superseded"
+        : "active",
+    sourcePrompt: row.sourcePrompt,
+    compiled: parseStoryboardCompilation(row.compiledJson),
+    createdAt: row.createdAt,
+  };
+}
+
+function promptVersionFromRow(row: typeof promptVersionsTable.$inferSelect): PromptVersion {
+  const metadata = parsePromptVersionMetadata(row.assumptionsJson, row.optimizedPrompt);
+  return {
+    id: row.id,
+    projectId: row.projectId,
+    sceneId: row.sceneId,
+    version: row.version,
+    rawPrompt: row.rawPrompt,
+    optimizedPrompt: row.optimizedPrompt,
+    negativePrompt: metadata.negativePrompt,
+    assumptions: metadata.assumptions,
+    compilerVersion: metadata.compilerVersion,
+    generationMode: metadata.generationMode,
+    targetProvider: metadata.targetProvider,
+    compilerConfig: metadata.compilerConfig,
+    compiledPayload: metadata.compiledPayload,
+    lintIssues: metadata.lintIssues,
+    accepted: row.accepted,
+    createdAt: row.createdAt,
+  };
+}
+
+function sceneFromRow(
+  row: typeof scenesTable.$inferSelect,
+  storyboard?: StoryboardVersion,
+  promptVersion?: PromptVersion,
+): Scene {
+  const sceneContract = storyboard?.compiled.sceneContracts.find(
+    (contract) => contract.sceneId === row.id,
+  ) ?? legacySceneContractFromRow(row);
+  return {
+    id: row.id,
+    projectId: row.projectId,
+    storyboardId: row.storyboardId,
+    storyboardVersion: storyboard?.version ?? null,
+    sceneContract,
+    promptVersionId: promptVersion?.id ?? null,
+    promptVersion: promptVersion?.version ?? null,
+    promptCompilerVersion: promptVersion?.compilerVersion ?? null,
     sceneIndex: row.sceneIndex,
     title: row.title,
     durationSeconds: row.durationSeconds,
@@ -1472,6 +1821,283 @@ function sceneFromRow(row: typeof scenesTable.$inferSelect): Scene {
     outputVideoUri: row.outputVideoKey,
     qualityScore: row.qualityScore,
   };
+}
+
+function legacySceneContractFromRow(row: typeof scenesTable.$inferSelect): SceneContract {
+  return {
+    version: 0,
+    sceneId: row.id,
+    sceneIndex: row.sceneIndex,
+    goal: row.title,
+    startState: {
+      subjectState: row.startState,
+      productState: row.startState,
+      environmentState: "Legacy scene did not persist a structured environment state.",
+      lightingState: "Legacy scene did not persist a structured lighting state.",
+      cameraState: "Legacy scene did not persist a structured camera state.",
+      compositionState: row.startState,
+    },
+    endState: {
+      subjectState: row.endState,
+      productState: row.endState,
+      environmentState: "Legacy scene did not persist a structured environment state.",
+      lightingState: "Legacy scene did not persist a structured lighting state.",
+      cameraState: "Legacy scene did not persist a structured camera state.",
+      compositionState: row.endState,
+    },
+    primaryAction: row.action,
+    subjectMotion: row.action,
+    cameraMotion: "legacy unspecified camera motion",
+    environmentMotion: "legacy unspecified environment motion",
+    backgroundPolicy: "controlled_motion",
+    visualStyle: "Legacy scene did not persist a visual style direction.",
+    audioDirection: "Legacy scene did not persist an audio direction.",
+    continuityLocks: [row.startState, row.endState].filter(Boolean),
+    negativeConstraints: row.negativePrompt.split(",").map((value) => value.trim()).filter(Boolean),
+    generationMode: row.sceneIndex === 1 ? "text_to_video" : "first_frame",
+    riskFactors: ["legacy_unstructured_scene"],
+    stableEndSeconds: 0.5,
+  };
+}
+
+function parseStoryboardCompilation(value: string): StoryboardCompilation {
+  try {
+    const parsed = JSON.parse(value) as Partial<StoryboardCompilation>;
+    if (
+      parsed.schemaVersion === 1 &&
+      parsed.planner?.kind === "deterministic_rules" &&
+      typeof parsed.planner.version === "string" &&
+      parsed.storyBible &&
+      Array.isArray(parsed.sceneContracts)
+    ) {
+      const storyBible = normalizeStoryBible(parsed.storyBible);
+      return {
+        ...(parsed as StoryboardCompilation),
+        storyBible,
+        sceneContracts: parsed.sceneContracts.map((contract) => ({
+          ...contract,
+          visualStyle: typeof contract.visualStyle === "string"
+            ? contract.visualStyle
+            : storyBible.visualStyle,
+          audioDirection: typeof contract.audioDirection === "string"
+            ? contract.audioDirection
+            : storyBible.audioDirection,
+        })),
+      };
+    }
+  } catch {
+    // Fall through to a safe legacy representation.
+  }
+  return {
+    schemaVersion: 1,
+    planner: { kind: "deterministic_rules", version: "legacy-unstructured" },
+    storyBible: LEGACY_UNSET_STORY_BIBLE,
+    sceneContracts: [],
+  };
+}
+
+function parsePromptVersionMetadata(value: string, positivePrompt: string): {
+  assumptions: string[];
+  compilerVersion: string;
+  generationMode: PromptVersion["generationMode"];
+  negativePrompt: string;
+  targetProvider: PromptVersion["targetProvider"];
+  compilerConfig: PromptVersion["compilerConfig"];
+  compiledPayload: PromptVersion["compiledPayload"];
+  lintIssues: PromptLintIssue[];
+} {
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown> | unknown[];
+    if (Array.isArray(parsed)) {
+      return {
+        assumptions: parsed.filter((item): item is string => typeof item === "string"),
+        compilerVersion: "legacy-unversioned",
+        generationMode: "text_to_video",
+        negativePrompt: "",
+        targetProvider: "google_veo",
+        compilerConfig: legacyCompilerConfig("text_to_video", "google_veo"),
+        compiledPayload: legacyCompiledPayload(positivePrompt, "", "text_to_video", "google_veo"),
+        lintIssues: [],
+      };
+    }
+    const generationMode = isGenerationMode(parsed.generationMode)
+      ? parsed.generationMode
+      : "text_to_video";
+    const targetProvider = isPromptTargetProvider(parsed.targetProvider)
+      ? parsed.targetProvider
+      : "google_veo";
+    const compilerVersion = typeof parsed.compilerVersion === "string"
+      ? parsed.compilerVersion
+      : "legacy-unversioned";
+    const negativePrompt = typeof parsed.negativePrompt === "string" ? parsed.negativePrompt : "";
+    const compilerConfig = parseCompilerConfig(parsed.compilerConfig, generationMode, targetProvider);
+    const lintIssues = Array.isArray(parsed.lintIssues)
+      ? parsed.lintIssues.filter(isPromptLintIssue)
+      : [];
+    return {
+      assumptions: Array.isArray(parsed.assumptions)
+        ? parsed.assumptions.filter((item): item is string => typeof item === "string")
+        : [],
+      compilerVersion,
+      generationMode,
+      negativePrompt,
+      targetProvider,
+      compilerConfig,
+      compiledPayload: parseCompiledPayload(
+        parsed.compiledPayload,
+        generationMode,
+        targetProvider,
+        compilerVersion,
+        compilerConfig,
+        negativePrompt,
+        lintIssues,
+        positivePrompt,
+      ),
+      lintIssues,
+    };
+  } catch {
+    return {
+      assumptions: [],
+      compilerVersion: "legacy-unversioned",
+      generationMode: "text_to_video",
+      negativePrompt: "",
+      targetProvider: "google_veo",
+      compilerConfig: legacyCompilerConfig("text_to_video", "google_veo"),
+      compiledPayload: legacyCompiledPayload(positivePrompt, "", "text_to_video", "google_veo"),
+      lintIssues: [],
+    };
+  }
+}
+
+function parseCompiledPayload(
+  value: unknown,
+  generationMode: PromptVersion["generationMode"],
+  targetProvider: PromptVersion["targetProvider"],
+  compilerVersion: string,
+  compilerConfig: PromptVersion["compilerConfig"],
+  negativePrompt: string,
+  lintIssues: PromptLintIssue[],
+  positivePrompt: string,
+): PromptVersion["compiledPayload"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return legacyCompiledPayload(
+      positivePrompt,
+      negativePrompt,
+      generationMode,
+      targetProvider,
+      compilerVersion,
+      compilerConfig,
+      lintIssues,
+    );
+  }
+  const parsed = value as Record<string, unknown>;
+  if (
+    parsed.deterministic !== true ||
+    typeof parsed.prompt !== "string" ||
+    typeof parsed.negativePrompt !== "string" ||
+    typeof parsed.compilerVersion !== "string" ||
+    !isGenerationMode(parsed.generationMode) ||
+    !isPromptTargetProvider(parsed.targetProvider)
+  ) {
+    return legacyCompiledPayload(
+      positivePrompt,
+      negativePrompt,
+      generationMode,
+      targetProvider,
+      compilerVersion,
+      compilerConfig,
+      lintIssues,
+    );
+  }
+  return {
+    compilerVersion: parsed.compilerVersion,
+    deterministic: true,
+    generationMode: parsed.generationMode,
+    targetProvider: parsed.targetProvider,
+    compilerConfig: parseCompilerConfig(
+      parsed.compilerConfig,
+      parsed.generationMode,
+      parsed.targetProvider,
+    ),
+    prompt: parsed.prompt,
+    negativePrompt: parsed.negativePrompt,
+    lintIssues: Array.isArray(parsed.lintIssues)
+      ? parsed.lintIssues.filter(isPromptLintIssue)
+      : [],
+  };
+}
+
+function legacyCompiledPayload(
+  positivePrompt: string,
+  negativePrompt: string,
+  generationMode: PromptVersion["generationMode"],
+  targetProvider: PromptVersion["targetProvider"],
+  compilerVersion = "legacy-unversioned",
+  compilerConfig = legacyCompilerConfig(generationMode, targetProvider),
+  lintIssues: PromptLintIssue[] = [],
+): PromptVersion["compiledPayload"] {
+  return {
+    compilerVersion,
+    deterministic: true,
+    generationMode,
+    targetProvider,
+    compilerConfig,
+    prompt: positivePrompt,
+    negativePrompt,
+    lintIssues,
+  };
+}
+
+function parseCompilerConfig(
+  value: unknown,
+  generationMode: PromptVersion["generationMode"],
+  targetProvider: PromptVersion["targetProvider"],
+): PromptVersion["compilerConfig"] {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const parsed = value as Record<string, unknown>;
+    if (
+      (parsed.negativePromptFormat === "comma_separated" || parsed.negativePromptFormat === "avoid_pipe") &&
+      (parsed.visualStylePolicy === "explicit" || parsed.visualStylePolicy === "continuity") &&
+      parsed.audioDirectionPolicy === "explicit"
+    ) {
+      return {
+        negativePromptFormat: parsed.negativePromptFormat,
+        visualStylePolicy: parsed.visualStylePolicy,
+        audioDirectionPolicy: "explicit",
+      };
+    }
+  }
+  return legacyCompilerConfig(generationMode, targetProvider);
+}
+
+function legacyCompilerConfig(
+  generationMode: PromptVersion["generationMode"],
+  targetProvider: PromptVersion["targetProvider"],
+): PromptVersion["compilerConfig"] {
+  return {
+    negativePromptFormat: targetProvider === "google_veo" ? "comma_separated" : "avoid_pipe",
+    visualStylePolicy: generationMode === "text_to_video" ? "explicit" : "continuity",
+    audioDirectionPolicy: "explicit",
+  };
+}
+
+function isGenerationMode(value: unknown): value is PromptVersion["generationMode"] {
+  return value === "text_to_video" ||
+    value === "first_frame" ||
+    value === "first_last_frame" ||
+    value === "reference_guided";
+}
+
+function isPromptTargetProvider(value: unknown): value is PromptVersion["targetProvider"] {
+  return value === "google_veo" || value === "mock";
+}
+
+function isPromptLintIssue(value: unknown): value is PromptLintIssue {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<PromptLintIssue>;
+  return typeof candidate.code === "string" &&
+    (candidate.severity === "error" || candidate.severity === "warning") &&
+    typeof candidate.message === "string";
 }
 
 function processingJobFromRow(
@@ -1520,8 +2146,22 @@ function generationJobFromProcessingState(job: GenerationJobProcessingState): Ge
 
 function parseStoryBible(value: string): StoryBible {
   try {
-    return { ...DEFAULT_STORY_BIBLE, ...(JSON.parse(value) as Partial<StoryBible>) };
+    return normalizeStoryBible(JSON.parse(value) as Partial<StoryBible>);
   } catch {
-    return DEFAULT_STORY_BIBLE;
+    return cloneStoryBible(LEGACY_UNSET_STORY_BIBLE);
   }
+}
+
+function normalizeStoryBible(value: Partial<StoryBible>): StoryBible {
+  return {
+    ...LEGACY_UNSET_STORY_BIBLE,
+    ...value,
+    mustAvoid: Array.isArray(value.mustAvoid)
+      ? value.mustAvoid.filter((item): item is string => typeof item === "string")
+      : [...LEGACY_UNSET_STORY_BIBLE.mustAvoid],
+  };
+}
+
+function cloneStoryBible(value: StoryBible): StoryBible {
+  return { ...value, mustAvoid: [...value.mustAvoid] };
 }

@@ -7,7 +7,7 @@ Xưởng video tự động: biến một brief thành storyboard có continuity
 | Phase | Phạm vi | Trạng thái |
 | --- | --- | --- |
 | 01 | Studio UI, tạo dự án, đăng nhập ChatGPT | Hoàn tất MVP |
-| 02 | Prompt compiler, Story Bible, storyboard 4 cảnh | Hoàn tất MVP |
+| 02 | Concrete Story Bible, versioned Scene Contracts, deterministic storyboard/compiler | Correction local PASS; chờ 2.5A re-review |
 | 03 | Job state + polling, phụ thuộc cảnh trước, manual QC + continuity | Hoàn tất MVP |
 | 04 | D1, R2, quyền sở hữu, credit ledger, Veo adapter | Hoàn tất nền tảng |
 | 05 | Render mock có MP4 xem trước; FFmpeg production | Mock hoàn tất, production cần hạ tầng |
@@ -20,9 +20,10 @@ Mặc định hệ thống chạy `mock` để không tiêu tiền. Khi cấu h�
 ```mermaid
 flowchart LR
   U[Người dùng] --> S[SceneFlow Studio]
-  S --> P[Prompt compiler]
-  P --> B[Story Bible + storyboard]
-  B --> Q[Hàng đợi cảnh]
+  S --> P[Deterministic planner]
+  P --> B[Versioned Story Bible + Scene Contracts]
+  B --> PC[Mode-aware prompt compiler + lint]
+  PC --> Q[Active scene projection + hàng đợi]
   Q --> V[Veo provider]
   V --> C[QC + frame cuối]
   C -->|frame neo| Q
@@ -33,6 +34,8 @@ flowchart LR
 ```
 
 Điểm quan trọng của continuity: cảnh `N + 1` không được gửi đi trước khi cảnh `N` đạt QC. Frame cuối của cảnh `N` trở thành frame mở đầu của cảnh kế tiếp; Story Bible tiếp tục khóa nhân vật, sản phẩm, bối cảnh, ánh sáng và phong cách.
+
+Checkpoint 2.5A dùng planner quy tắc xác định, không gọi LLM. Project mới phải nhập Story Bible cụ thể gồm nhân vật, sản phẩm, bối cảnh, ánh sáng, visual style, audio direction và must-avoid; placeholder hoặc câu dựa trên reference chưa bind bị từ chối. Mỗi lần lập storyboard tạo một row/version mới trong `storyboards`; `compiled_json` giữ Story Bible snapshot và bốn authoritative Scene Contracts. Prompt history giữ exact positive/negative payload, generation mode, compiler version, provider target và compiler config trong schema `prompt_versions` hiện có; `scenes` chỉ là projection bốn cảnh đang hoạt động. Project đã có job/render history không được đổi Story Bible hoặc replan trong 2.5A để tránh làm orphan các operation chưa có immutable version binding.
 
 ## Veo 3.1 Lite
 
@@ -101,6 +104,7 @@ Model mapping:
 
 - `.openai/hosting.json` khai báo D1 binding `DB` và R2 binding `MEDIA`.
 - D1 tự khởi tạo schema idempotent ở request đầu tiên; migration chuẩn nằm trong `drizzle/0000_sceneflow_initial.sql`.
+- Checkpoint 2.5A kích hoạt các bảng `storyboards`, `prompt_versions` và cột `scenes.storyboard_id` đã có sẵn; không thêm migration.
 - Mọi route ghi dữ liệu yêu cầu Sign in with ChatGPT.
 - Project, scene, job và asset luôn được kiểm tra theo email chủ sở hữu ở server.
 - Ảnh chỉ nhận JPG/PNG/WebP tối đa 20 MB; request multipart bị giới hạn trước hoặc trong khi parse và MIME phải khớp magic bytes thực tế.
@@ -109,10 +113,12 @@ Model mapping:
 
 ## API chính
 
-- `POST /api/prompts/optimize` — cấu trúc prompt, tách giả định và câu hỏi cần xác nhận.
-- `GET|POST /api/projects` — danh sách/tạo project thuộc người dùng.
+- `POST /api/prompts/optimize` — deterministic brief preview, tách giả định và câu hỏi cần xác nhận; không phải AI planner.
+- `GET|POST /api/projects` — danh sách/tạo project thuộc người dùng; POST yêu cầu `storyBible` cụ thể với đủ bảy trường product truth.
+- `GET|PATCH /api/projects/:id` — lấy project/scene hoặc cập nhật Story Bible đã validate trước execution history; auth và ownership chạy phía server.
 - `POST /api/assets` — tải ảnh tham chiếu vào R2.
-- `POST /api/projects/:id/storyboard` — tạo chuỗi cảnh và dependency.
+- `GET /api/projects/:id/storyboard` — lấy storyboard và prompt-version history thuộc owner.
+- `POST /api/projects/:id/storyboard` — tạo storyboard version và active scene projection mới; body `{ "confirmApprovedReplacement": true }` bắt buộc khi projection hiện tại có scene approved.
 - `POST /api/scenes/:id/generate` — gửi cảnh đủ điều kiện vào provider.
 - `GET /api/scenes/:id/media` — mở MP4 mock hoặc stream video GCS riêng tư của cảnh.
 - `GET /api/jobs/:id` — polling job mock hoặc Vertex AI.

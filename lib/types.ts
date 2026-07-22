@@ -29,6 +29,139 @@ export type StoryBible = {
   mustAvoid: string[];
 };
 
+export type StoryBibleField = keyof StoryBible;
+
+export type StoryBibleValidationIssue = {
+  field: StoryBibleField;
+  code: "missing" | "too_long" | "generic_placeholder" | "unbound_reference" | "invalid_list";
+  message: string;
+};
+
+export type GenerationMode =
+  | "text_to_video"
+  | "first_frame"
+  | "first_last_frame"
+  | "reference_guided";
+
+export type BackgroundPolicy = "static" | "controlled_motion";
+
+export type StructuredVisualState = {
+  subjectState: string;
+  productState: string;
+  environmentState: string;
+  lightingState: string;
+  cameraState: string;
+  compositionState: string;
+};
+
+export type SceneContract = {
+  version: number;
+  sceneId: string;
+  sceneIndex: number;
+  goal: string;
+  startState: StructuredVisualState;
+  endState: StructuredVisualState;
+  primaryAction: string;
+  subjectMotion: string;
+  cameraMotion: string;
+  environmentMotion: string;
+  backgroundPolicy: BackgroundPolicy;
+  visualStyle: string;
+  audioDirection: string;
+  continuityLocks: string[];
+  negativeConstraints: string[];
+  generationMode: GenerationMode;
+  riskFactors: string[];
+  stableEndSeconds: number;
+};
+
+export type PromptLintSeverity = "error" | "warning";
+
+export type PromptLintIssueCode =
+  | "multiple_primary_actions"
+  | "conflicting_camera_instructions"
+  | "locked_camera_motion_conflict"
+  | "missing_stable_end_state"
+  | "excessive_sequential_actions"
+  | "missing_continuity_locks"
+  | "redundant_image_prompt"
+  | "generic_story_bible_lock"
+  | "missing_visual_style"
+  | "missing_audio_direction";
+
+export type PromptLintIssue = {
+  code: PromptLintIssueCode;
+  severity: PromptLintSeverity;
+  message: string;
+};
+
+export type ScenePromptCompilation = {
+  compilerVersion: string;
+  deterministic: true;
+  generationMode: GenerationMode;
+  targetProvider: PromptTargetProvider;
+  compilerConfig: ScenePromptCompilerConfig;
+  prompt: string;
+  negativePrompt: string;
+  lintIssues: PromptLintIssue[];
+};
+
+export type PromptTargetProvider = "google_veo" | "mock";
+
+export type ScenePromptCompilerConfig = {
+  negativePromptFormat: "comma_separated" | "avoid_pipe";
+  visualStylePolicy: "explicit" | "continuity";
+  audioDirectionPolicy: "explicit";
+};
+
+export type StoryboardCompilation = {
+  schemaVersion: 1;
+  planner: {
+    kind: "deterministic_rules";
+    version: string;
+  };
+  storyBible: StoryBible;
+  sceneContracts: SceneContract[];
+};
+
+export type StoryboardVersion = {
+  id: string;
+  projectId: string;
+  version: number;
+  status: "active" | "superseded" | "approved";
+  sourcePrompt: string;
+  compiled: StoryboardCompilation;
+  createdAt: string;
+};
+
+export type PromptVersion = {
+  id: string;
+  projectId: string;
+  sceneId: string | null;
+  version: number;
+  rawPrompt: string;
+  optimizedPrompt: string;
+  negativePrompt: string;
+  assumptions: string[];
+  compilerVersion: string;
+  generationMode: GenerationMode;
+  targetProvider: PromptTargetProvider;
+  compilerConfig: ScenePromptCompilerConfig;
+  compiledPayload: ScenePromptCompilation;
+  lintIssues: PromptLintIssue[];
+  accepted: boolean;
+  createdAt: string;
+};
+
+export type StoryboardVersionDraft = {
+  id: string;
+  sourcePrompt: string;
+  compiled: StoryboardCompilation;
+  scenes: Scene[];
+  promptVersions: PromptVersion[];
+  allowApprovedReplacement: boolean;
+};
+
 export type Project = {
   id: string;
   ownerId: string;
@@ -47,6 +180,12 @@ export type Project = {
 export type Scene = {
   id: string;
   projectId: string;
+  storyboardId: string | null;
+  storyboardVersion: number | null;
+  sceneContract: SceneContract;
+  promptVersionId: string | null;
+  promptVersion: number | null;
+  promptCompilerVersion: string | null;
   sceneIndex: number;
   title: string;
   durationSeconds: number;
@@ -113,6 +252,11 @@ export type PromptCompilation = {
   clarificationQuestions: string[];
   optimizedPromptEn: string;
   negativePrompt: string;
+  compiler: {
+    kind: "deterministic_rules";
+    version: string;
+    label: string;
+  };
   config: {
     aspectRatio: AspectRatio;
     durationSeconds: 4 | 6 | 8;

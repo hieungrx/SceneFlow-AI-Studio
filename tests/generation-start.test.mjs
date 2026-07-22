@@ -147,7 +147,7 @@ test("quality_check is blocked without reservation or provider work", async () =
 });
 
 test("a dependent scene submits with the approved previous end frame", async () => {
-  let submittedStartFrame;
+  let submittedRequest;
   const previous = scene("scene-1", 1, {
     status: "approved",
     endFrameUri: "mock://scene-1-last.jpg",
@@ -160,7 +160,7 @@ test("a dependent scene submits with the approved previous end frame", async () 
   const harness = makeHarness({
     scenes: [previous, dependent],
     submit: async (request) => {
-      submittedStartFrame = request.startFrameUri;
+      submittedRequest = request;
       return queuedOperation("continuity-operation");
     },
   });
@@ -168,7 +168,19 @@ test("a dependent scene submits with the approved previous end frame", async () 
   const result = await harness.start(dependent.id);
 
   assert.equal(result.ok, true);
-  assert.equal(submittedStartFrame, previous.endFrameUri);
+  assert.equal(submittedRequest.startFrameUri, previous.endFrameUri);
+  assert.equal(submittedRequest.lastFrameUri, null);
+  assert.deepEqual(Object.keys(submittedRequest).sort(), [
+    "aspectRatio",
+    "durationSeconds",
+    "lastFrameUri",
+    "model",
+    "negativePrompt",
+    "projectId",
+    "prompt",
+    "sceneId",
+    "startFrameUri",
+  ]);
 });
 
 function makeHarness(options = {}) {

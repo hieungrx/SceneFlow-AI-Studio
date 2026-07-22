@@ -603,6 +603,38 @@ textarea {
   resize: vertical;
 }
 
+.story-bible-editor {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #e8e1fb;
+  border-radius: 11px;
+  background: #faf8fd;
+}
+
+.story-bible-editor legend {
+  padding: 0 5px;
+  color: #4b405f;
+  font-size: 10px;
+  font-weight: 850;
+}
+
+.story-bible-editor > small,
+.story-bible-editor > button {
+  grid-column: 1 / -1;
+}
+
+.story-bible-editor > small {
+  color: #766f80;
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.story-bible-editor textarea {
+  min-height: 66px;
+}
+
 input:hover,
 textarea:hover,
 select:hover,
@@ -1125,6 +1157,42 @@ textarea::placeholder {
   line-height: 1.55;
 }
 
+.scene-content > .scene-goal {
+  min-height: 58px;
+}
+
+.scene-goal strong {
+  color: #5f4ca2;
+}
+
+.scene-contract-grid {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.scene-contract-grid > div {
+  display: grid;
+  gap: 2px;
+  padding: 6px 7px;
+  border: 1px solid #eee9f6;
+  border-radius: 7px;
+  background: #faf8fd;
+}
+
+.scene-contract-grid strong {
+  color: #6553a6;
+  font-size: 7px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.scene-contract-grid span {
+  color: #70677d;
+  font-size: 7.5px;
+  line-height: 1.4;
+}
+
 .boundary-note {
   min-height: 39px;
   padding: 7px 8px;
@@ -1515,6 +1583,7 @@ textarea::placeholder {
   .storyboard-panel { padding: 14px; }
 
   .upload-strip,
+  .story-bible-editor,
   .form-row,
   .form-row.three { grid-template-columns: 1fr; }
   .storyboard-actions { display: none; }

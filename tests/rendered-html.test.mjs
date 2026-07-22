@@ -20,6 +20,32 @@ test("contains the SceneFlow studio experience", () => {
   assert.match(page, /StudioDashboard/);
 });
 
+test("presents deterministic planning and the actual selected scene model truthfully", () => {
+  const dashboard = readProjectFile("app/components/StudioDashboard.tsx");
+  const sceneCard = readProjectFile("app/components/SceneCard.tsx");
+
+  assert.doesNotMatch(dashboard, /AI hiểu ý bạn/);
+  assert.doesNotMatch(dashboard, /Storyboard & keyframe/);
+  assert.match(dashboard, /compilation\.compiler\.label/);
+  assert.match(dashboard, /không dùng LLM/);
+  assert.match(dashboard, /modelLabel\(job\.model\)/);
+  assert.match(sceneCard, /scene\.sceneContract\.goal/);
+  assert.match(sceneCard, /scene\.sceneContract\.startState\.compositionState/);
+  assert.match(sceneCard, /scene\.sceneContract\.endState\.compositionState/);
+  assert.match(sceneCard, /generationModeLabel/);
+  assert.match(sceneCard, /riskFactors/);
+  assert.match(sceneCard, /modelLabel\(activeJob\.model\)/);
+  assert.match(dashboard, /Story Bible cụ thể/);
+  assert.match(dashboard, /chưa được bind vào Veo/);
+  assert.match(dashboard, /method: "PATCH"/);
+  assert.match(sceneCard, /Đã lập kế hoạch nhận dạng/);
+
+  const combined = `${dashboard}\n${sceneCard}`;
+  assert.doesNotMatch(combined, /Identity locked/i);
+  assert.doesNotMatch(combined, /Reference locked/i);
+  assert.doesNotMatch(combined, /Product locked/i);
+});
+
 test("removes the disposable starter preview", () => {
   const dashboard = readProjectFile("app/components/StudioDashboard.tsx");
   const page = readProjectFile("app/page.tsx");
