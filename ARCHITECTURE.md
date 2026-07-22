@@ -1,6 +1,6 @@
 # ARCHITECTURE.md — Kiến trúc SceneFlow AI Studio
 
-> Tài liệu này mô tả kiến trúc hiện tại sau Checkpoint 2.4B. Code/test local, production Sites 2.4A và renderer Cloud Run/GCS staging 2.4B đã hoàn tất; real Veo E2E và các SIWC interaction checks còn lại vẫn phải hoàn tất.
+> Tài liệu này mô tả kiến trúc hiện tại trong Checkpoint 2.4C. Code/test local, production Sites 2.4A và renderer Cloud Run/GCS staging 2.4B đã hoàn tất; Veo Gate 1 và continuity hai cảnh Gate 2 đã PASS cả kỹ thuật lẫn owner manual QC. Trong Gate 3, cảnh 3 và preview cứu hộ cảnh 4 đã được owner approve; generation đã dừng trong hard cap. Artifact cứu hộ đã được upload private và final render bốn cảnh đã PASS kiểm tra kỹ thuật, quyền riêng tư và HTTP Range. Gate 3 còn chờ owner playback QC cuối; các SIWC interaction checks cũng chưa hoàn tất.
 
 ## 1. Mục tiêu kiến trúc
 
@@ -46,7 +46,7 @@ flowchart LR
   API --> GCS
 ```
 
-Các đường nối không có nghĩa mọi dịch vụ đã nối vào production. Cloud Run/GCS renderer staging đã canary PASS trong 2.4B; Veo thật, Worker-to-renderer wiring và production-scale queue/observability vẫn thuộc roadmap.
+Các đường nối không có nghĩa mọi dịch vụ đã nối vào production. Cloud Run/GCS renderer staging đã canary PASS trong 2.4B; một cảnh Veo 3.1 Fast thật đã PASS Gate 1, Gate 2 đã PASS extraction frame → image-to-video cảnh kế tiếp → owner manual QC, và Gate 3 đã lặp lại continuity cho cảnh 3–4. Cảnh 3 và preview cứu hộ cảnh 4 đã được owner approve; artifact cứu hộ hiện là private GCS source chính thức của staging final render. Final render 32 giây đã PASS technical/private/range checks nhưng còn chờ owner playback QC. Worker-to-renderer wiring và production-scale queue/observability vẫn thuộc roadmap.
 
 ## 3. Trust boundary và Sign in with ChatGPT
 
@@ -197,7 +197,7 @@ Implementation 2.4A hiện tại:
 | Upload magic bytes, bounded request, exact-key compensation | Gate local PASS; production đã publish |
 | Cumulative upload quota | Hoãn; không thuộc 2.4A |
 | Cloud Run/GCS renderer staging | Deploy + canary PASS Checkpoint 2.4B |
-| Real Veo E2E và Worker-to-renderer wiring | Chưa triển khai |
+| Real Veo E2E và Worker-to-renderer wiring | Gate 1 PASS; Gate 2 continuity hai cảnh + owner QC PASS; Gate 3 cảnh 3 và salvage cảnh 4 owner-approved, final render staging technical/private/range PASS và đang chờ owner playback QC; production wiring chưa triển khai |
 | Production queue, observability, lifecycle | Chưa triển khai |
 
 ## 10. Quy tắc khi thay đổi kiến trúc
