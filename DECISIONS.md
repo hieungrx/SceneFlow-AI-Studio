@@ -160,3 +160,40 @@ Renderer client hiện gửi shared secret trong `X-Renderer-Token` nhưng calle
 - Giữ `--no-allow-unauthenticated` trong khi caller không có Google ID token rồi coi integration là hoạt động.
 - Cấp `Storage Admin`, `Editor` hoặc quyền ghi không giới hạn cho renderer runtime service account.
 - Bật renderer trong Studio mock và gửi URI `mock://` tới Cloud Run.
+
+## ADR-006 — Versioned Scene Contracts dùng schema planning hiện có
+
+- **Trạng thái:** Accepted
+- **Ngày xác nhận:** 2026-07-22
+- **Phạm vi:** Checkpoint 2.5A — Product Truth and Scene Contracts
+
+### Bối cảnh
+
+Storyboard MVP trước đây tạo bốn beat generic trực tiếp trong API route, biên dịch prompt bằng một hàm nối chuỗi và xóa active scene rows khi lập lại. Schema ban đầu đã có `storyboards`, `prompt_versions` và `scenes.storyboard_id`, nhưng các bảng/liên kết này chưa được dùng. Unique index hiện tại trên `(scenes.project_id, scenes.scene_index)` chỉ cho phép một projection bốn cảnh hoạt động cho mỗi project; generation jobs và renders cũng chưa lưu trực tiếp storyboard/prompt version.
+
+### Quyết định
+
+- Scene planning dùng `SceneContract` provider-neutral, serializable và có version. Contract chứa visual state đầu/cuối, một primary action, motion, background policy, `visualStyle`, `audioDirection`, continuity locks, generation mode, risk factors và stable-end requirement.
+- Project mới phải nhận bảy trường Story Bible cụ thể qua API/UI. Create/PATCH và planner cùng từ chối generic placeholder hoặc claim về reference chưa bind; legacy project thiếu product truth phải được bổ sung trước khi plan.
+- Planner bốn cảnh trong 2.5A là deterministic rules, có version rõ ràng và không được mô tả là AI/LLM planner.
+- `storyboards.compiled_json` giữ Story Bible snapshot và bốn authoritative Scene Contracts. Mỗi lần lập lại tạo row/version mới; row cũ chỉ chuyển từ `active` sang `superseded`, không bị xóa hoặc ghi đè compiled JSON.
+- `prompt_versions` giữ raw/compiled prompt cho từng scene. `assumptions_json` chứa exact positive/negative compiled payload, compiler version, generation mode, target provider, compiler config và lint issues; không cần thay đổi schema.
+- `scenes` chỉ là active projection và liên kết tới authoritative version qua `storyboard_id`. Scene reads được enrich từ storyboard/prompt history; legacy rows nhận contract compatibility version `0`.
+- Replan có scene `approved` bắt buộc `confirmApprovedReplacement: true`. Nếu project đã có bất kỳ generation job hoặc final render history nào, 2.5A từ chối replan kể cả đã xác nhận để không xóa scene rows mà job/render cũ đang tham chiếu.
+- Provider request, renderer contract, credit ledger, manual QC, private media và extraction v2 không thay đổi trong checkpoint này.
+
+### Hệ quả và đánh đổi
+
+- Không cần migration hoặc backfill phá hủy; schema/bootstrap hiện có đủ cho authoritative planning history và active projection.
+- D1 batch cập nhật status, tạo version, thay projection, ghi prompt versions và cập nhật project như một đơn vị atomic; concurrent replans tuần tự hóa thành các version riêng và chỉ còn một projection active.
+- Lịch sử contract/prompt được giữ đầy đủ, nhưng 2.5A chưa có immutable scene candidate/attempt linkage. Vì vậy project đã thực thi generation/render không thể replan an toàn; khả năng này phải chờ data model provenance ở checkpoint sau.
+- First-frame compiler có mặt và Scene 2–4 khai báo mode tương ứng, nhưng reference binding, boundary keyframes và `lastFrameUri` vẫn chưa được triển khai.
+- `visualStyle` được render trực tiếp trong text-to-video và giữ như continuity direction ở image-guided modes; `audioDirection` được render trong cả bốn mode vì provider generation hiện bật audio.
+
+### Không chọn
+
+- Thêm migration chỉ để duplicate các cột đã tồn tại.
+- Lưu Scene Contract bằng cách nhồi JSON vào các cột text `start_state`/`end_state`.
+- Xóa storyboard hoặc prompt history khi lập lại.
+- Cho replan project đã có job/render rồi để lại foreign reference logic sai version.
+- Đưa provider-specific asset/keyframe fields vào Scene Contract trong 2.5A.

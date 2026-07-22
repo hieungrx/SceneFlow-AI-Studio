@@ -8,6 +8,15 @@ import { after, before, test } from "node:test";
 
 const root = process.cwd();
 const owner = "qc-owner@example.com";
+const concreteStoryBible = {
+  characterLock: "Vietnamese barista, black bob hair, beige linen shirt, dark brown apron.",
+  productLock: "White 180 ml cup with a cobalt rim, no text, no logo.",
+  environmentLock: "Small coffee shop with walnut counter and copper espresso machine.",
+  lightingLock: "Warm 7 AM light always enters from camera left.",
+  visualStyle: "Photorealistic warm cinematic commercial with shallow depth of field.",
+  audioDirection: "Natural coffee shop room tone without dialogue.",
+  mustAvoid: ["identity drift", "cup deformation", "extra hands"],
+};
 let baseUrl;
 let runtime;
 let stateDirectory;
@@ -79,6 +88,243 @@ test("manual QC API runtime behavior", async (t) => {
     assert.equal(response.body.error, "authentication_required");
   });
 
+  await t.test("project API creates and updates concrete Story Bible before planning", async () => {
+    const ownerId = "story-bible-runtime@example.com";
+    const missing = await api("/api/projects", {
+      method: "POST",
+      ownerId,
+      body: {
+        name: "Missing Story Bible",
+        brief: "A concrete runtime request that intentionally omits product truth.",
+      },
+    });
+    assert.equal(missing.status, 400);
+    assert.equal(missing.body.error, "invalid_story_bible");
+
+    const generic = await api("/api/projects", {
+      method: "POST",
+      ownerId,
+      body: {
+        name: "Generic Story Bible",
+        brief: "A runtime request that attempts to use unbound references.",
+        storyBible: {
+          ...concreteStoryBible,
+          characterLock: "Giữ nguyên khuôn mặt và trang phục từ ảnh tham chiếu.",
+        },
+      },
+    });
+    assert.equal(generic.status, 400);
+    assert.equal(generic.body.error, "invalid_story_bible");
+    assert.ok(generic.body.issues.some((issue) => issue.code === "unbound_reference"));
+
+    const created = await createProject(ownerId, concreteStoryBible);
+    assert.deepEqual(created.storyBible, concreteStoryBible);
+
+    const unauthenticatedUpdate = await api(`/api/projects/${created.id}`, {
+      method: "PATCH",
+      body: { storyBible: concreteStoryBible },
+    });
+    assert.equal(unauthenticatedUpdate.status, 401);
+    const nonOwnerUpdate = await api(`/api/projects/${created.id}`, {
+      method: "PATCH",
+      ownerId: "story-bible-other@example.com",
+      body: { storyBible: concreteStoryBible },
+    });
+    assert.equal(nonOwnerUpdate.status, 404);
+
+    const updatedStoryBible = {
+      ...concreteStoryBible,
+      visualStyle: "Photorealistic premium coffee film with warm amber highlights and fine grain.",
+      audioDirection: "Quiet coffee shop room tone, one ceramic cup sound, no music and no dialogue.",
+    };
+    const updated = await api(`/api/projects/${created.id}`, {
+      method: "PATCH",
+      ownerId,
+      body: { storyBible: updatedStoryBible },
+    });
+    assert.equal(updated.status, 200);
+    assert.deepEqual(updated.body.project.storyBible, updatedStoryBible);
+
+    const storyboard = await api(`/api/projects/${created.id}/storyboard`, {
+      method: "POST",
+      ownerId,
+    });
+    assert.equal(storyboard.status, 201);
+    assert.deepEqual(storyboard.body.storyboard.compiled.storyBible, updatedStoryBible);
+    assert.ok(storyboard.body.storyboard.compiled.sceneContracts.every((contract) =>
+      contract.visualStyle === updatedStoryBible.visualStyle &&
+      contract.audioDirection === updatedStoryBible.audioDirection
+    ));
+    const firstScene = storyboard.body.scenes[0];
+    for (const field of [
+      "characterLock",
+      "productLock",
+      "environmentLock",
+      "lightingLock",
+      "visualStyle",
+      "audioDirection",
+    ]) {
+      assert.match(firstScene.prompt, new RegExp(escapeRegExp(updatedStoryBible[field])));
+    }
+    assert.doesNotMatch(
+      firstScene.prompt,
+      /chưa khóa|ảnh tham chiếu|ảnh tải lên|reference (?:image|asset|input)|bound reference/i,
+    );
+  });
+
+  await t.test("storyboard replan increments versions and preserves authoritative history", async () => {
+    const fixture = await createStoryboard("storyboard-version@example.com");
+    assert.equal(fixture.storyboard.version, 1);
+    assert.equal(fixture.storyboard.compiled.sceneContracts.length, 4);
+    const originalStoryboard = structuredClone(fixture.storyboard);
+    const beforeReplan = await api(`/api/projects/${fixture.project.id}/storyboard`, {
+      ownerId: fixture.ownerId,
+    });
+    assert.equal(beforeReplan.status, 200);
+    const originalPromptVersions = structuredClone(beforeReplan.body.promptVersions);
+
+    const replanned = await api(`/api/projects/${fixture.project.id}/storyboard`, {
+      method: "POST",
+      ownerId: fixture.ownerId,
+    });
+    assert.equal(replanned.status, 201);
+    assert.equal(replanned.body.storyboard.version, 2);
+    assert.notEqual(replanned.body.storyboard.id, fixture.storyboard.id);
+
+    const history = await api(`/api/projects/${fixture.project.id}/storyboard`, {
+      ownerId: fixture.ownerId,
+    });
+    assert.equal(history.status, 200);
+    assert.deepEqual(history.body.storyboards.map((storyboard) => storyboard.version), [2, 1]);
+    assert.equal(history.body.storyboards[0].status, "active");
+    assert.equal(history.body.storyboards[1].status, "superseded");
+    assert.deepEqual(history.body.storyboards[1].compiled, originalStoryboard.compiled);
+    assert.equal(history.body.promptVersions.length, 8);
+    assert.ok(
+      originalStoryboard.compiled.sceneContracts.every((contract) =>
+        history.body.promptVersions.some((promptVersion) =>
+          promptVersion.sceneId === contract.sceneId &&
+          promptVersion.compilerVersion === "scene-contract-prompt-v2"
+        )
+      ),
+    );
+    for (const originalPrompt of originalPromptVersions) {
+      const preserved = history.body.promptVersions.find((item) => item.id === originalPrompt.id);
+      assert.ok(preserved, `prompt history ${originalPrompt.id} must be preserved`);
+      assert.equal(preserved.optimizedPrompt, originalPrompt.optimizedPrompt);
+      assert.equal(preserved.negativePrompt, originalPrompt.negativePrompt);
+      assert.equal(preserved.generationMode, originalPrompt.generationMode);
+      assert.equal(preserved.compilerVersion, originalPrompt.compilerVersion);
+      assert.equal(preserved.targetProvider, originalPrompt.targetProvider);
+      assert.deepEqual(preserved.compilerConfig, originalPrompt.compilerConfig);
+      assert.deepEqual(preserved.compiledPayload, originalPrompt.compiledPayload);
+      assert.equal(preserved.compiledPayload.prompt, originalPrompt.optimizedPrompt);
+      assert.equal(preserved.compiledPayload.negativePrompt, originalPrompt.negativePrompt);
+    }
+
+    const active = await api(`/api/projects/${fixture.project.id}`, {
+      ownerId: fixture.ownerId,
+    });
+    assert.equal(active.status, 200);
+    assert.equal(active.body.scenes.length, 4);
+    for (const scene of active.body.scenes) {
+      assert.equal(scene.storyboardId, replanned.body.storyboard.id);
+      assert.equal(scene.storyboardVersion, 2);
+      assert.equal(scene.sceneContract.sceneId, scene.id);
+      assert.equal(scene.promptVersion, 1);
+      assert.equal(scene.promptCompilerVersion, "scene-contract-prompt-v2");
+    }
+  });
+
+  await t.test("storyboard history retrieval is owner-scoped", async () => {
+    const fixture = await createStoryboard("storyboard-owner@example.com");
+    const unauthenticated = await api(`/api/projects/${fixture.project.id}/storyboard`);
+    assert.equal(unauthenticated.status, 401);
+    assert.equal(unauthenticated.body.error, "authentication_required");
+
+    const nonOwner = await api(`/api/projects/${fixture.project.id}/storyboard`, {
+      ownerId: "storyboard-other@example.com",
+    });
+    assert.equal(nonOwner.status, 404);
+    assert.equal(nonOwner.body.error, "project_not_found");
+  });
+
+  await t.test("concurrent replans serialize versions and leave one coherent active projection", async () => {
+    const fixture = await createStoryboard("storyboard-concurrent@example.com");
+    const responses = await Promise.all([
+      api(`/api/projects/${fixture.project.id}/storyboard`, {
+        method: "POST",
+        ownerId: fixture.ownerId,
+      }),
+      api(`/api/projects/${fixture.project.id}/storyboard`, {
+        method: "POST",
+        ownerId: fixture.ownerId,
+      }),
+    ]);
+    for (const response of responses) assert.equal(response.status, 201);
+    assert.deepEqual(responses.map((response) => response.body.storyboard.version).sort(), [2, 3]);
+
+    const history = await api(`/api/projects/${fixture.project.id}/storyboard`, {
+      ownerId: fixture.ownerId,
+    });
+    assert.deepEqual(history.body.storyboards.map((storyboard) => storyboard.version), [3, 2, 1]);
+    assert.equal(
+      history.body.storyboards.filter((storyboard) => storyboard.status === "active").length,
+      1,
+    );
+    const activeStoryboard = history.body.storyboards[0];
+    const project = await api(`/api/projects/${fixture.project.id}`, {
+      ownerId: fixture.ownerId,
+    });
+    assert.ok(project.body.scenes.every((scene) => scene.storyboardId === activeStoryboard.id));
+    assert.ok(project.body.scenes.every((scene) => scene.storyboardVersion === 3));
+  });
+
+  await t.test("approved storyboard requires explicit confirmation before replan", async () => {
+    const fixture = await createStoryboard("storyboard-approved@example.com");
+    await executeLocalSql(
+      `UPDATE scenes SET status = 'approved' WHERE id = '${sqlText(fixture.scenes[0].id)}';`,
+    );
+
+    const blocked = await api(`/api/projects/${fixture.project.id}/storyboard`, {
+      method: "POST",
+      ownerId: fixture.ownerId,
+    });
+    assert.equal(blocked.status, 409);
+    assert.equal(blocked.body.error, "approved_storyboard_requires_confirmation");
+    const beforeConfirmation = await api(`/api/projects/${fixture.project.id}/storyboard`, {
+      ownerId: fixture.ownerId,
+    });
+    assert.deepEqual(beforeConfirmation.body.storyboards.map((storyboard) => storyboard.version), [1]);
+
+    const confirmed = await api(`/api/projects/${fixture.project.id}/storyboard`, {
+      method: "POST",
+      ownerId: fixture.ownerId,
+      body: { confirmApprovedReplacement: true },
+    });
+    assert.equal(confirmed.status, 201);
+    assert.equal(confirmed.body.storyboard.version, 2);
+  });
+
+  await t.test("replan refuses execution history so existing scene and job references stay valid", async () => {
+    const fixture = await createQualityCheckScene("storyboard-history-guard@example.com");
+    const blocked = await api(`/api/projects/${fixture.project.id}/storyboard`, {
+      method: "POST",
+      ownerId: fixture.ownerId,
+    });
+    assert.equal(blocked.status, 409);
+    assert.equal(blocked.body.error, "storyboard_replan_has_execution_history");
+
+    const project = await api(`/api/projects/${fixture.project.id}`, {
+      ownerId: fixture.ownerId,
+    });
+    assert.equal(project.status, 200);
+    assert.ok(project.body.scenes.some((scene) => scene.id === fixture.scene.id));
+    const job = await api(`/api/jobs/${fixture.job.id}`, { ownerId: fixture.ownerId });
+    assert.equal(job.status, 200);
+    assert.equal(job.body.job.sceneId, fixture.scene.id);
+  });
+
   await t.test("mock completion enters quality_check and repeated poll is idempotent", async () => {
     const fixture = await createQualityCheckScene("mock-idempotent@example.com");
     const beforeScene = fixture.scene;
@@ -120,7 +366,7 @@ test("manual QC API runtime behavior", async (t) => {
 
   await t.test("active extraction metadata is never serialized by the jobs API", async () => {
     const fixture = await createMockCompletionBoundary("qc-private-claim@example.com");
-    executeLocalSql(
+    await executeLocalSql(
       `UPDATE generation_jobs SET extraction_claim_token = 'private-claim-token', extraction_claim_kind = 'completion', extraction_claim_expires_at = '2099-01-01T00:00:00.000Z', extraction_failure_code = NULL, error_code = NULL, state_version = state_version + 1 WHERE id = '${sqlText(fixture.job.id)}';`,
     );
 
@@ -136,7 +382,7 @@ test("manual QC API runtime behavior", async (t) => {
 
   await t.test("scene-terminal job-running partial state reconciles without generation side effects", async () => {
     const fixture = await createQualityCheckScene("qc-partial-scene@example.com");
-    executeLocalSql(
+    await executeLocalSql(
       `UPDATE generation_jobs SET status = 'running', progress = 64 WHERE id = '${sqlText(fixture.job.id)}';`,
     );
 
@@ -151,7 +397,7 @@ test("manual QC API runtime behavior", async (t) => {
 
   await t.test("job-done scene-active partial state is recoverable on a later poll", async () => {
     const fixture = await createMockCompletionBoundary("qc-partial-job@example.com");
-    executeLocalSql(
+    await executeLocalSql(
       `UPDATE generation_jobs SET status = 'done', progress = 100 WHERE id = '${sqlText(fixture.job.id)}';`,
     );
 
@@ -166,7 +412,7 @@ test("manual QC API runtime behavior", async (t) => {
 
   await t.test("partial extraction failure recovers output and remains idempotent", async () => {
     const fixture = await createMockCompletionBoundary("qc-partial-extraction@example.com");
-    executeLocalSql(
+    await executeLocalSql(
       `UPDATE generation_jobs SET status = 'failed', progress = 100, error_code = 'end_frame_extraction_failed' WHERE id = '${sqlText(fixture.job.id)}';`,
     );
 
@@ -203,7 +449,7 @@ test("manual QC API runtime behavior", async (t) => {
 
   await t.test("approve returns 409 when quality_check media is incomplete", async () => {
     const fixture = await createQualityCheckScene("qc-missing-media@example.com");
-    executeLocalSql(
+    await executeLocalSql(
       `UPDATE scenes SET end_frame_key = NULL WHERE id = '${sqlText(fixture.scene.id)}';`,
     );
 
@@ -376,7 +622,7 @@ test("manual QC API runtime behavior", async (t) => {
     const fixture = await createStoryboard("generation-project-guard@example.com");
     const first = fixture.scenes[0];
     const second = fixture.scenes[1];
-    executeLocalSql(
+    await executeLocalSql(
       `UPDATE scenes SET status = 'planned', depends_on_scene_id = NULL WHERE id = '${sqlText(second.id)}';`,
     );
     const admitted = await api(`/api/scenes/${first.id}/generate`, {
@@ -442,7 +688,7 @@ test("manual QC API runtime behavior", async (t) => {
     const renderFixture = await createStoryboard("generation-render-guard@example.com");
     const renderId = `render_${crypto.randomUUID()}`;
     const now = new Date().toISOString();
-    executeLocalSql(
+    await executeLocalSql(
       `INSERT INTO final_renders (id, project_id, status, manifest_json, output_video_key, duration_seconds, created_at, updated_at) VALUES ('${sqlText(renderId)}', '${sqlText(renderFixture.project.id)}', 'queued', '{}', NULL, NULL, '${sqlText(now)}', '${sqlText(now)}');`,
     );
     const blockedGeneration = await api(`/api/scenes/${renderFixture.scenes[0].id}/generate`, {
@@ -542,6 +788,21 @@ async function generateFixtureSceneToQualityCheck(fixture, scene) {
 }
 
 async function createStoryboard(ownerId = owner) {
+  const project = await createProject(ownerId, concreteStoryBible);
+  const storyboard = await api(`/api/projects/${project.id}/storyboard`, {
+    method: "POST",
+    ownerId,
+  });
+  assert.equal(storyboard.status, 201);
+  return {
+    ownerId,
+    project,
+    storyboard: storyboard.body.storyboard,
+    scenes: storyboard.body.scenes,
+  };
+}
+
+async function createProject(ownerId, storyBible) {
   const created = await api("/api/projects", {
     method: "POST",
     ownerId,
@@ -551,6 +812,7 @@ async function createStoryboard(ownerId = owner) {
       aspectRatio: "9:16",
       targetDurationSeconds: 30,
       model: "veo-3.1-lite",
+      storyBible,
     },
   });
   assert.equal(
@@ -558,13 +820,7 @@ async function createStoryboard(ownerId = owner) {
     201,
     `${JSON.stringify(created.body)}\nRuntime output:\n${runtimeOutput}`,
   );
-  const project = created.body.project;
-  const storyboard = await api(`/api/projects/${project.id}/storyboard`, {
-    method: "POST",
-    ownerId,
-  });
-  assert.equal(storyboard.status, 201);
-  return { ownerId, project, scenes: storyboard.body.scenes };
+  return created.body.project;
 }
 
 async function readScene(ownerId, projectId, sceneId) {
@@ -579,7 +835,7 @@ function qc(sceneId, ownerId, body) {
   return api(`/api/scenes/${sceneId}/qc`, { method: "POST", ownerId, body });
 }
 
-function executeLocalSql(command) {
+async function executeLocalSql(command) {
   const result = spawnSync(
     process.execPath,
     [
@@ -607,10 +863,15 @@ function executeLocalSql(command) {
     },
   );
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  await waitForRuntimeStability();
 }
 
 function sqlText(value) {
   return value.replaceAll("'", "''");
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 async function api(path, options = {}) {
@@ -618,16 +879,23 @@ async function api(path, options = {}) {
   if (options.ownerId) headers.set("oai-authenticated-user-email", options.ownerId);
   if (options.body !== undefined) headers.set("content-type", "application/json");
   const requestBody = options.body === undefined ? undefined : JSON.stringify(options.body);
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const response = await fetch(`${baseUrl}${path}`, {
-      method: options.method ?? "GET",
-      headers,
-      body: requestBody,
-    });
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    let response;
+    try {
+      response = await fetch(`${baseUrl}${path}`, {
+        method: options.method ?? "GET",
+        headers,
+        body: requestBody,
+      });
+    } catch (error) {
+      if (attempt === 4) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
+      continue;
+    }
     const text = await response.text();
     const isJson = response.headers.get("content-type")?.includes("application/json") ?? false;
-    if (response.status === 503 && !isJson && attempt < 2) {
-      await new Promise((resolve) => setTimeout(resolve, 25));
+    if (response.status === 503 && !isJson && attempt < 4) {
+      await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
       continue;
     }
     let body = {};
@@ -639,6 +907,24 @@ async function api(path, options = {}) {
     return { status: response.status, body, raw: text, contentType: response.headers.get("content-type") };
   }
   throw new Error("Unreachable local HTTP retry state.");
+}
+
+async function waitForRuntimeStability() {
+  const deadline = Date.now() + 15_000;
+  let consecutiveSuccesses = 0;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(`${baseUrl}/api/credits`, {
+        headers: { "oai-authenticated-user-email": "qc-runtime-stability@example.com" },
+      });
+      consecutiveSuccesses = response.status === 200 ? consecutiveSuccesses + 1 : 0;
+      if (consecutiveSuccesses >= 2) return;
+    } catch {
+      consecutiveSuccesses = 0;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`Wrangler did not stabilize after local D1 mutation.\n${runtimeOutput}`);
 }
 
 async function waitForRuntime() {
@@ -661,6 +947,7 @@ async function waitForRuntime() {
               name: "QC runtime readiness",
               brief: "Initialize the isolated local D1 write path before assertions.",
               model: "veo-3.1-lite",
+              storyBible: concreteStoryBible,
             }),
           })
         : null;
@@ -679,6 +966,7 @@ async function waitForRuntime() {
               name: "QC runtime stable write",
               brief: "Confirm the local runtime is stable after loading the QC route.",
               model: "veo-3.1-lite",
+              storyBible: concreteStoryBible,
             }),
           })
         : null;

@@ -33,6 +33,7 @@ export default function SceneCard({
   const policy = getSceneActionPolicy(scene, scenes, hasActiveGeneration);
   const actionPending = pendingAction !== null;
   const actionDisabled = busy || actionPending;
+  const activeJob = jobs.find((job) => job.sceneId === scene.id);
 
   return (
     <article className="scene-card">
@@ -51,13 +52,13 @@ export default function SceneCard({
         <span className="scene-number">{String(scene.sceneIndex).padStart(2, "0")}</span>
         <span className="duration-pill">{scene.durationSeconds}s</span>
         {!mediaUrl ? (
-          <span className="visual-subject">{index === 3 ? "Hero frame" : "Identity locked"}</span>
+          <span className="visual-subject">{index === 3 ? "Khung hero dự kiến" : "Đã lập kế hoạch nhận dạng"}</span>
         ) : null}
         {scene.status === "queued" || scene.status === "generating" ? (
           <div className="generation-overlay">
             <span className="spinner" />
-            <strong>{jobProgress(jobs, scene.id)}%</strong>
-            <small>Veo Lower Priority</small>
+            <strong>{activeJob?.progress ?? 18}%</strong>
+            <small>{activeJob ? modelLabel(activeJob.model) : "Đang chờ model đã chọn"}</small>
           </div>
         ) : null}
       </div>
@@ -66,8 +67,16 @@ export default function SceneCard({
           <h3>{scene.title}</h3>
           <StatusPill status={scene.status} />
         </div>
-        <p>{scene.action}</p>
-        <div className="boundary-note"><strong>Kết cảnh:</strong> {scene.endState}</div>
+        <p className="scene-goal"><strong>Mục tiêu:</strong> {scene.sceneContract.goal}</p>
+        <div className="scene-contract-grid">
+          <div><strong>Hành động chính</strong><span>{scene.sceneContract.primaryAction}</span></div>
+          <div><strong>Trạng thái đầu</strong><span>{scene.sceneContract.startState.compositionState}</span></div>
+          <div><strong>Trạng thái cuối</strong><span>{scene.sceneContract.endState.compositionState}</span></div>
+          <div><strong>Chế độ tạo</strong><span>{generationModeLabel(scene.sceneContract.generationMode)}</span></div>
+          <div><strong>Phong cách</strong><span>{scene.sceneContract.visualStyle}</span></div>
+          <div><strong>Âm thanh</strong><span>{scene.sceneContract.audioDirection}</span></div>
+          <div><strong>Rủi ro</strong><span>{scene.sceneContract.riskFactors.length > 0 ? scene.sceneContract.riskFactors.join(", ") : "Không phát hiện rủi ro đặc thù"}</span></div>
+        </div>
         {scene.status === "quality_check" ? (
           <div className="qc-actions" aria-label={`Quyết định QC cảnh ${scene.sceneIndex}`}>
             <button
@@ -133,6 +142,19 @@ function sceneStatusLabel(status: Scene["status"]): string {
   } as Record<Scene["status"], string>)[status];
 }
 
-function jobProgress(jobs: GenerationJob[], sceneId: string): number {
-  return jobs.find((job) => job.sceneId === sceneId)?.progress ?? 18;
+function generationModeLabel(mode: Scene["sceneContract"]["generationMode"]): string {
+  return ({
+    text_to_video: "Text-to-video",
+    first_frame: "First-frame",
+    first_last_frame: "First/last-frame",
+    reference_guided: "Reference-guided",
+  } as const)[mode];
+}
+
+function modelLabel(model: GenerationJob["model"]): string {
+  return ({
+    "veo-3.1-lite": "Veo 3.1 Lite",
+    "veo-3.1-fast": "Veo 3.1 Fast",
+    "veo-3.1-standard": "Veo 3.1 Standard",
+  } as const)[model];
 }

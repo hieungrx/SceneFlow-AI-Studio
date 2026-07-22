@@ -166,3 +166,57 @@ Thứ tự đề xuất: auth origin → final-render media → asset ingestion 
 ### Bước tiếp theo
 
 Owner xem toàn bộ final render bốn cảnh. Nếu approve, đóng Gate 3 ở trạng thái PASS; nếu reject, ghi nhận Gate 3 chưa đạt và không gửi generation mới vì generation đã dừng trong hard cap. Hoàn tất riêng các kiểm tra SIWC tương tác còn lại; chỉ nối `RENDER_SERVICE_*` vào Studio khi scene source đã là `gs://` hoặc HTTPS hợp lệ.
+
+## Checkpoint 2.5A — Product Truth and Scene Contracts
+
+**Trạng thái:** Independent QA lần đầu FAIL; correction implementation local hoàn tất và chờ re-review
+
+**Ngày implementation:** 2026-07-22
+
+**Ngày correction:** 2026-07-22
+
+### Phạm vi đã triển khai
+
+- Thêm `SceneContract` provider-neutral có version, structured visual state đầu/cuối, primary action, motion, background policy, continuity locks, generation mode, risk factors và stable-end requirement.
+- Thay beat/prompt concatenation trong storyboard route bằng deterministic planner bốn cảnh và mode-aware compiler. Scene 1 dùng `text_to_video`; Scene 2–4 tiếp tục dùng `first_frame`, đúng workflow last-frame chaining hiện tại.
+- Thêm prompt lint cho multiple/sequential actions, camera conflict, locked-camera conflict, stable end, continuity locks, generic Story Bible locks và static-content repetition trong image-guided prompt.
+- Kích hoạt `storyboards`, `prompt_versions` và `scenes.storyboard_id` đã có sẵn; không tạo migration. `compiled_json` giữ authoritative contracts, prompt metadata giữ compiler version và scene rows chỉ là active projection.
+- Replan tạo version mới và giữ authoritative history. Approved projection cần explicit confirmation; project có bất kỳ job/render history nào bị chặn replan để tránh orphan hoặc wrong-version reference trong schema hiện tại.
+- UI bỏ tuyên bố “AI hiểu ý bạn”, hiển thị deterministic compiler/planner version, Scene Contract fields và model thật trả về từ generation job.
+
+### Independent QA findings và correction
+
+- **Finding 1 — Product Truth runtime:** `POST /api/projects` và `PATCH /api/projects/:id` nhận/validate bảy trường Story Bible cụ thể. Generic placeholder và claim về reference/ảnh chưa bind trả `400 invalid_story_bible`; planner validate lại trước khi tạo storyboard. Project có execution history không được đổi Story Bible.
+- **Finding 2 — style/audio regression:** Scene Contract v2 giữ `visualStyle` và `audioDirection`. Compiler v2 đưa cả hai vào text-to-video; first-frame giữ style continuity mà không lặp static state và vẫn có audio; first/last-frame và reference-guided vẫn có audio direction.
+- **Finding 3 — incomplete prompt history:** `prompt_versions.assumptions_json` giữ exact compiled payload gồm positive prompt, negative prompt, generation mode, compiler version, target provider, compiler config và lint issues. Replan không xóa payload của version cũ.
+- **Finding 4 — UI overclaim:** bỏ `Identity locked`; UI dùng “Đã lập kế hoạch nhận dạng”, đổi continuity panel thành kế hoạch và ghi rõ ảnh private chưa được bind vào Veo.
+- Không có migration, provider request, renderer contract, reference binding, paid call hoặc Cloud change.
+
+### Ranh giới giữ nguyên
+
+- Không đổi provider request; `lastFrameUri` vẫn là `null` và previous approved end frame vẫn đi vào `startFrameUri`.
+- Không reference asset binding, R2→GCS promotion, boundary keyframe, paid Veo call, durable workflow/queue, semantic QC/repair/escalation hoặc Render v2.
+- Không đổi ownership/auth, atomic generation admission, credit debit/refund, manual QC, downstream invalidation, private media hoặc extraction v2.
+
+### Bằng chứng local correction
+
+- Targeted unit/UI/generation regression gồm Story Bible validation, bốn compiler mode, style/audio và UI policy: PASS.
+- Targeted Wrangler/D1 integration: **27/27 PASS** ở lần chạy correction đầu; bao phủ project create/PATCH, Story Bible snapshot, concrete scene-1 prompt, full prompt-history preservation, ownership, replan guards và pipeline regressions.
+- Production build: PASS.
+- Targeted correction suite cuối: **28/28 PASS**.
+- Wrangler/D1 integration sau fix PASS ba lần liên tiếp (hai standalone và một lần trong full suite), mỗi lần **27/27**.
+- Full `npm run verify`: lint sạch, production build thành công, **204/204 test/subtest PASS** và renderer syntax check hợp lệ.
+
+### Điều tra transient 198/200
+
+- Subtest chính xác: `approved storyboard requires explicit confirmation before replan`; lỗi `TypeError: fetch failed`. Parent suite cũng fail nên tổng đếm giảm từ 200 xuống 198.
+- Tái hiện được trên commit ban đầu khi subtest gọi HTTP ngay sau `wrangler d1 execute --local` chạy bằng một process thứ hai trên cùng persistence directory mà Wrangler dev đang dùng. Tất cả subtest sau tiếp tục PASS, chứng minh runtime chỉ gián đoạn tạm thời chứ replan state không sai.
+- Correction đổi SQL mutation helper thành async, chờ hai health probe liên tiếp sau mỗi out-of-process D1 mutation, và chỉ retry bounded cho network/HTML-503 transient; JSON application error không bị retry hoặc che giấu.
+- Runtime integration, full parallel suite và final `npm run verify` sau correction đều PASS. GitHub CI evidence được kiểm tra sau khi push correction commit.
+
+### Hạn chế đã biết
+
+- 2.5A chưa có immutable generation attempt/candidate binding, nên không cho replan project đã có job/render history.
+- `reference_guided` và `first_last_frame` mới có deterministic compiler/test; active four-scene plan chưa dùng hai mode này.
+- Production Sites chưa deploy checkpoint này và vẫn dùng mock.
+- Correction chỉ chờ independent re-review; không bắt đầu Checkpoint 2.5B.

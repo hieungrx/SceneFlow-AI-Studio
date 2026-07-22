@@ -1,59 +1,177 @@
 import { NextResponse } from "next/server";
 import { getChatGPTUser } from "../../../../chatgpt-auth";
-import { getOwnedProject, saveOwnedScenes } from "../../../../../lib/repository";
-import { compileVideoPrompt } from "../../../../../lib/prompt-compiler";
-import type { Scene } from "../../../../../lib/types";
+import {
+  createOwnedStoryboardVersion,
+  findOwnedActiveJobForProject,
+  findOwnedActiveRenderForProject,
+  getOwnedProject,
+  hasOwnedExecutionHistory,
+  listOwnedScenes,
+  listOwnedPromptVersions,
+  listOwnedStoryboards,
+} from "../../../../../lib/repository";
+import {
+  compileScenePrompt,
+  SCENE_PROMPT_COMPILER_VERSION,
+} from "../../../../../lib/prompt-compiler";
+import {
+  planDeterministicStoryboard,
+  STORYBOARD_PLANNER_VERSION,
+} from "../../../../../lib/storyboard-planner";
+import { validateConcreteStoryBible } from "../../../../../lib/story-bible";
+import type {
+  PromptVersion,
+  Scene,
+  StoryboardCompilation,
+} from "../../../../../lib/types";
 
 type Context = { params: Promise<{ id: string }> };
 
-export async function POST(_request: Request, { params }: Context) {
+export async function GET(_request: Request, { params }: Context) {
   const user = await getChatGPTUser();
   if (!user) return NextResponse.json({ error: "authentication_required" }, { status: 401 });
   const { id } = await params;
   const project = await getOwnedProject(user.email, id);
   if (!project) return NextResponse.json({ error: "project_not_found" }, { status: 404 });
 
-  const beats = [
-    ["Hook", "Giới thiệu chủ thể và vấn đề ngay trong 2 giây đầu", "Chủ thể nhìn về phía sản phẩm"],
-    ["Trải nghiệm", "Thể hiện thao tác sử dụng chính một cách tự nhiên", "Sản phẩm ở vị trí trung tâm"],
-    ["Lợi ích", "Cho thấy kết quả và chi tiết nổi bật", "Giữ khung hình ổn định"],
-    ["Hero & CTA", "Kết thúc bằng hero shot có cảm xúc", "Sản phẩm sắc nét, nền gọn"],
-  ] as const;
+  const [storyboards, promptVersions] = await Promise.all([
+    listOwnedStoryboards(user.email, id),
+    listOwnedPromptVersions(user.email, id),
+  ]);
+  return NextResponse.json({
+    storyboards: storyboards ?? [],
+    promptVersions: promptVersions ?? [],
+  });
+}
 
-  const sceneList: Scene[] = beats.map((beat, index) => {
-    const compiled = compileVideoPrompt({
-      rawPrompt: `${project.brief}. Cảnh ${index + 1}: ${beat[1]}.`,
-      aspectRatio: project.aspectRatio,
-      durationSeconds: 8,
-      model: project.model,
-      style: project.storyBible.visualStyle,
-      audio: project.storyBible.audioDirection,
+export async function POST(request: Request, { params }: Context) {
+  const user = await getChatGPTUser();
+  if (!user) return NextResponse.json({ error: "authentication_required" }, { status: 401 });
+  const { id } = await params;
+  const project = await getOwnedProject(user.email, id);
+  if (!project) return NextResponse.json({ error: "project_not_found" }, { status: 404 });
+
+  const storyBibleIssues = validateConcreteStoryBible(project.storyBible);
+  if (storyBibleIssues.length > 0) {
+    return NextResponse.json(
+      { error: "invalid_story_bible", issues: storyBibleIssues },
+      { status: 400 },
+    );
+  }
+
+  const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+  const allowApprovedReplacement = body?.confirmApprovedReplacement === true;
+  const [currentScenes, activeJob, activeRender, hasExecutionHistory] = await Promise.all([
+    listOwnedScenes(user.email, id),
+    findOwnedActiveJobForProject(user.email, id),
+    findOwnedActiveRenderForProject(user.email, id),
+    hasOwnedExecutionHistory(user.email, id),
+  ]);
+  if (activeJob || activeRender) {
+    return NextResponse.json({ error: "project_operation_in_progress" }, { status: 409 });
+  }
+  if (
+    currentScenes.some((scene) => scene.status === "approved") &&
+    !allowApprovedReplacement
+  ) {
+    return NextResponse.json(
+      { error: "approved_storyboard_requires_confirmation" },
+      { status: 409 },
+    );
+  }
+  if (currentScenes.length > 0 && hasExecutionHistory) {
+    return NextResponse.json(
+      { error: "storyboard_replan_has_execution_history" },
+      { status: 409 },
+    );
+  }
+
+  const storyboardId = `storyboard_${crypto.randomUUID()}`;
+  const plannedScenes = planDeterministicStoryboard(project);
+  const createdAt = new Date().toISOString();
+  const promptVersions: PromptVersion[] = [];
+  const sceneList: Scene[] = plannedScenes.map((planned, index) => {
+    const compilation = compileScenePrompt(planned.contract);
+    const promptVersionId = `prompt_${crypto.randomUUID()}`;
+    promptVersions.push({
+      id: promptVersionId,
+      projectId: project.id,
+      sceneId: planned.contract.sceneId,
+      version: 1,
+      rawPrompt: `${planned.contract.goal}\n${planned.contract.primaryAction}`,
+      optimizedPrompt: compilation.prompt,
+      negativePrompt: compilation.negativePrompt,
+      assumptions: [
+        `Storyboard planned by ${STORYBOARD_PLANNER_VERSION}.`,
+        "No LLM or paid provider call was used.",
+      ],
+      compilerVersion: compilation.compilerVersion,
+      generationMode: compilation.generationMode,
+      targetProvider: compilation.targetProvider,
+      compilerConfig: compilation.compilerConfig,
+      compiledPayload: compilation,
+      lintIssues: compilation.lintIssues,
+      accepted: true,
+      createdAt,
     });
     return {
-      id: `scene_${crypto.randomUUID()}`,
+      id: planned.contract.sceneId,
       projectId: project.id,
-      sceneIndex: index + 1,
-      title: beat[0],
+      storyboardId,
+      storyboardVersion: null,
+      sceneContract: planned.contract,
+      promptVersionId,
+      promptVersion: 1,
+      promptCompilerVersion: SCENE_PROMPT_COMPILER_VERSION,
+      sceneIndex: planned.contract.sceneIndex,
+      title: planned.title,
       durationSeconds: 8,
       status: index === 0 ? "planned" : "waiting_previous",
-      startState: index === 0 ? "Keyframe mở đầu khóa chủ thể và sản phẩm." : beats[index - 1][2],
-      action: beat[1],
-      endState: beat[2],
-      prompt: compiled.optimizedPromptEn,
-      negativePrompt: `${compiled.negativePrompt}, ${project.storyBible.mustAvoid.join(", ")}`,
-      transition: index === 0 ? "hard_cut" : "match_cut",
-      dependsOnSceneId: null,
+      startState: planned.contract.startState.compositionState,
+      action: planned.contract.primaryAction,
+      endState: planned.contract.endState.compositionState,
+      prompt: compilation.prompt,
+      negativePrompt: compilation.negativePrompt,
+      transition: planned.transition,
+      dependsOnSceneId: index === 0 ? null : plannedScenes[index - 1].contract.sceneId,
       startFrameUri: null,
       endFrameUri: null,
       outputVideoUri: null,
       qualityScore: null,
     };
   });
-  for (let index = 1; index < sceneList.length; index += 1) {
-    sceneList[index].dependsOnSceneId = sceneList[index - 1].id;
+  const compiled: StoryboardCompilation = {
+    schemaVersion: 1,
+    planner: {
+      kind: "deterministic_rules",
+      version: STORYBOARD_PLANNER_VERSION,
+    },
+    storyBible: {
+      ...project.storyBible,
+      mustAvoid: [...project.storyBible.mustAvoid],
+    },
+    sceneContracts: plannedScenes.map((planned) => planned.contract),
+  };
+  const saved = await createOwnedStoryboardVersion(user.email, project.id, {
+    id: storyboardId,
+    sourcePrompt: project.brief,
+    compiled,
+    scenes: sceneList,
+    promptVersions,
+    allowApprovedReplacement,
+  });
+  if (!saved) {
+    return NextResponse.json({ error: "storyboard_replan_conflict" }, { status: 409 });
   }
-
-  const scenes = await saveOwnedScenes(user.email, project.id, sceneList);
-  if (!scenes) return NextResponse.json({ error: "project_not_found" }, { status: 404 });
-  return NextResponse.json({ scenes }, { status: 201 });
+  return NextResponse.json(
+    {
+      storyboard: saved.storyboard,
+      scenes: saved.scenes,
+      planner: {
+        kind: "deterministic_rules",
+        version: STORYBOARD_PLANNER_VERSION,
+      },
+    },
+    { status: 201 },
+  );
 }

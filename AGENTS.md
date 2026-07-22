@@ -82,9 +82,9 @@ Chi tiết conventions cho từng layer → xem `CONVENTIONS.md`.
 ## 6. Luồng nghiệp vụ (tham chiếu khi debug hoặc thêm feature)
 
 1. Người dùng đăng nhập (ChatGPT auth headers) → `ensureUser()` tạo/cập nhật user + welcome credit
-2. Tạo project → gán Story Bible mặc định
-3. Brief được tối ưu thành prompt có cấu trúc qua `compileVideoPrompt()` — tách intent, assumptions, negative prompt
-4. Hệ thống tạo storyboard 4 cảnh với dependency chain (`dependsOnSceneId`)
+2. Tạo/cập nhật project → nhập và validate bảy trường Story Bible cụ thể; placeholder hoặc claim về reference chưa bind bị từ chối
+3. Brief preview dùng `compileBriefPreview()`; deterministic planner kết hợp brief + Story Bible snapshot để tạo bốn authoritative `SceneContract`, gồm cả visual style và audio direction
+4. Mode-aware `compileScenePrompt()` tạo prompt có version; positive/negative prompt, mode, provider target và compiler config được lưu trước khi bốn scene trở thành active projection với dependency chain (`dependsOnSceneId`)
 5. Các cảnh vào hàng đợi theo thứ tự phụ thuộc — kiểm tra credit trước khi gửi
 6. Veo provider (`MockVeoProvider` hoặc `GoogleVeoProvider`) tạo video cho từng cảnh
 7. QC cảnh → lấy frame cuối để nối continuity (`extractLastFrame()`)
@@ -95,7 +95,7 @@ Chi tiết conventions cho từng layer → xem `CONVENTIONS.md`.
 
 ## 7. Trạng thái hiện tại
 
-**Đã hoàn thành (MVP + 2.4A + renderer staging 2.4B + Veo staging 2.4C Gate 1–2, Gate 3 đang chạy):** Studio UI · quản lý project · prompt compiler · Story Bible + storyboard 4 cảnh · pipeline tạo cảnh tuần tự · manual QC + khóa frame nối cảnh · private scene playback · D1/R2 + kiểm tra quyền sở hữu dữ liệu · credit ledger append-only · mock Veo + adapter Vertex AI Veo thật · MP4 mẫu phát được · renderer FFmpeg + API contract cho Cloud Run · strict private scene/final-render media · bounded asset upload + magic-byte validation + exact-key R2 compensation · CI cơ bản. Production Sites 2.4A đã publish. Cloud Run/GCS staging 2.4B đã deploy tại `us-central1`, renderer canary thật đã PASS cho render 4 clip, extraction v2 replay/conflict, private GCS và byte range. Veo staging 2.4C Gate 1 đã PASS với một video thật bằng `veo-3.1-fast-generate-001`. Gate 2 đã PASS extraction private, continuity hai cảnh và owner manual QC; cảnh 2 lần đầu bị reject vì có bàn tay ngoài ý muốn, lần regenerate đã loại lỗi và được owner approve. Trong Gate 3, cảnh 3 và preview cứu hộ cảnh 4 đã được owner approve; generation đã dừng ở ~100.000/120.000 VND. Artifact cứu hộ đã được upload private với checksum khớp, và final render bốn cảnh đã PASS technical/private/range checks; owner playback QC cuối vẫn đang chờ. Lint, production build, **182/182** test/subtest và kiểm tra renderer đều PASS ngày 2026-07-22.
+**Đã hoàn thành local (MVP + 2.4A–2.4C + Checkpoint 2.5A correction):** Studio UI · quản lý project · concrete Story Bible create/update validation · versioned Scene Contracts có visual style/audio direction · deterministic storyboard planner bốn cảnh · mode-aware prompt compiler + lint · full compiled prompt history trên schema hiện có · active scene projection · pipeline tạo cảnh tuần tự · manual QC + khóa frame nối cảnh · private scene playback · D1/R2 + kiểm tra quyền sở hữu dữ liệu · credit ledger append-only · mock Veo + adapter Vertex AI Veo thật · MP4 mẫu phát được · renderer FFmpeg + API contract cho Cloud Run · strict private scene/final-render media · bounded asset upload + magic-byte validation + exact-key R2 compensation · CI cơ bản. Production Sites vẫn ở 2.4A và dùng mock; 2.5A correction chưa publish và đang chờ independent re-review. Cloud Run/GCS renderer staging và Veo staging giữ nguyên bằng chứng 2.4B–2.4C; owner playback QC cuối của Gate 3 vẫn đang chờ. Production build và **204/204** test/subtest PASS local ngày 2026-07-22; full verify/CI evidence của correction được ghi ở `SPRINT.md`.
 
 **Còn thiếu trước production — không coi các mục này là "đã ổn":**
 - Owner xem toàn bộ final render staging; nếu approve thì đóng Gate 3 PASS, nếu reject thì ghi nhận Gate 3 chưa đạt và không tạo thêm clip. Studio production vẫn dùng mock
@@ -111,6 +111,7 @@ Chi tiết conventions cho từng layer → xem `CONVENTIONS.md`.
 - Quota Veo đủ cho ~100 video/ngày nếu đó là mục tiêu
 - Error boundaries và error handling UI phía client
 - Tách `StudioDashboard.tsx` (626 dòng) thành nhiều component nhỏ hơn
+- Replan project đã có generation/render history đang fail-closed trong 2.5A cho tới khi có immutable attempt/candidate version binding
 
 **⚠️ Quy tắc kiểm tra trạng thái Git — đọc trước khi chạy bất kỳ lệnh git nào:**
 - Luôn kiểm tra `git status --short` và `git log -1 --oneline` trước thao tác Git; không giả định snapshot trong tài liệu vẫn còn đúng.
